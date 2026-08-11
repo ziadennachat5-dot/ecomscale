@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Search, MapPin, AlertCircle } from "lucide-react";
 import { supabase } from "../lib/supabase";
+import type { ShippingCarrier } from "../lib/types";
 
 export interface OzonCity {
   id: number;
@@ -16,6 +17,14 @@ export interface ColiatyCity {
   name: string;
 }
 
+export interface ForceLogCity {
+  provider_city_id: number;
+  code: string;
+  name: string;
+  delivered_price: number | null;
+  same_city_price: number | null;
+}
+
 export interface CitySelectorValue {
   ozon_city_id?: number | null;
   carrier_city_id?: number | null;
@@ -29,7 +38,7 @@ interface CitySelectorProps {
   required?: boolean;
   disabled?: boolean;
   showWarning?: boolean;
-  carrier?: 'ozon' | 'coliaty'; // New: specify which carrier to use
+  carrier?: ShippingCarrier;
 }
 
 export function CitySelector({
@@ -43,14 +52,13 @@ export function CitySelector({
 }: CitySelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [results, setResults] = useState<OzonCity[] | ColiatyCity[]>([]);
+  const [results, setResults] = useState<Array<OzonCity | ColiatyCity | ForceLogCity>>([]);
   const [loading, setLoading] = useState(false);
   const [noResults, setNoResults] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const tableName = carrier === 'coliaty' ? 'coliaty_cities' : 'ozon_cities';
-  const cityIdField = carrier === 'coliaty' ? 'carrier_city_id' : 'ozon_city_id';
-  const hasCityId = carrier === 'coliaty' ? value.carrier_city_id : value.ozon_city_id;
+  const tableName = carrier === 'forcelog' ? 'forcelog_cities' : carrier === 'coliaty' ? 'coliaty_cities' : 'ozon_cities';
+  const hasCityId = carrier === 'ozon' ? value.ozon_city_id : value.carrier_city_id;
 
   // Load default cities on focus if empty
   useEffect(() => {
@@ -137,15 +145,15 @@ export function CitySelector({
     }
   };
 
-  const saveToCityArabicNames = async (arabicName: string, coliatyCityId: number) => {
-    if (carrier !== 'coliaty') return;
+  const saveToCityArabicNames = async (arabicName: string, carrierCityId: number) => {
+    if (carrier === 'ozon') return;
     
     try {
       // Check if mapping already exists
       const { data: existing } = await supabase
         .from('city_arabic_names')
         .select('*')
-        .eq('carrier', 'coliaty')
+        .eq('carrier', carrier)
         .eq('arabic_name', arabicName)
         .single();
 
@@ -154,25 +162,26 @@ export function CitySelector({
         await supabase
           .from('city_arabic_names')
           .insert({
-            carrier: 'coliaty',
+            carrier,
             arabic_name: arabicName,
-            carrier_city_id: coliatyCityId,
+            carrier_city_id: carrierCityId,
             ozon_city_id: null
           });
-        console.log(`Saved mapping: "${arabicName}" -> ${coliatyCityId}`);
+        console.log(`Saved ${carrier} mapping: "${arabicName}" -> ${carrierCityId}`);
       }
     } catch (error) {
       console.error("Error saving city mapping:", error);
     }
   };
 
-  const handleSelectCity = (city: OzonCity | ColiatyCity) => {
+  const handleSelectCity = (city: OzonCity | ColiatyCity | ForceLogCity) => {
     const newValue: CitySelectorValue = {
       city_name: city.name,
     };
 
-    if (carrier === 'coliaty') {
-      newValue.carrier_city_id = city.id;
+    if (carrier !== 'ozon') {
+      const providerCityId = 'provider_city_id' in city ? city.provider_city_id : city.id;
+      newValue.carrier_city_id = providerCityId;
       newValue.ozon_city_id = null;
       // Save mapping for future automatic resolution
       if (value.city_name) {

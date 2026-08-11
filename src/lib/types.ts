@@ -15,6 +15,8 @@ export type OrderStatus =
   | "refused"
   | "new";
 
+export type ShippingCarrier = "ozon" | "coliaty" | "forcelog";
+
 export interface Workspace {
   id: string;
   name: string;
@@ -34,7 +36,7 @@ export interface Workspace {
   business_product_cost?: number | null;
   google_sheet_url?: string | null;
   google_sheet_autosync?: boolean | null;
-  carrier?: "ozon" | "coliaty" | null;
+  carrier?: ShippingCarrier | null;
   coliaty_enabled?: boolean | null;
   coliaty_api_key?: string | null; // Deprecated: replaced by public and secret keys
   coliaty_public_key?: string | null;

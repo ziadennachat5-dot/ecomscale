@@ -70,11 +70,11 @@ Supabase CLI:
 
 ```bash
 supabase secrets set \
-  SUPABASE_URL=https://wxfialbmyfkafobtkrde.supabase.co \
-  SUPABASE_SERVICE_ROLE_KEY=sb_secret_FDOt0gbJvkvoK9JgdQ9xwQ_nl76oc0C \
-  GOOGLE_CLIENT_ID=663048931798-egisotaudnusp59h0lbqka0f699mh6iq.apps.googleusercontent.com \
-  GOOGLE_CLIENT_SECRET=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 \
-  GOOGLE_REDIRECT_URI=http://localhost:8080/api/google/callback
+SUPABASE_URL="https://wxfialbmyfkafobtkrde.supabase.co" \
+SUPABASE_SERVICE_ROLE_KEY="YOUR_NEW_SUPABASE_SERVICE_ROLE_KEY" \
+GOOGLE_CLIENT_ID="YOUR_GOOGLE_CLIENT_ID" \
+GOOGLE_CLIENT_SECRET="YOUR_NEW_GOOGLE_CLIENT_SECRET" \
+GOOGLE_REDIRECT_URI="http://localhost:8080/api/google/callback"
 ```
 
 ### 5. Deploy the Edge Functions

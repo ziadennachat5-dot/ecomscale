@@ -13,10 +13,12 @@ import { WorkspaceResetModal, WorkspaceResetProgressModal, WorkspaceResetSuccess
 import { ProfilePictureUploader } from "../components/ProfilePictureUploader";
 import OzonShippingIntegrationCard from "./settings/components/OzonShippingIntegrationCard";
 import ColiatyShippingIntegrationCard from "./settings/components/ColiatyShippingIntegrationCard";
+import ForceLogShippingIntegrationCard from "./settings/components/ForceLogShippingIntegrationCard";
 import GoogleSheetIntegrationCard from "./settings/components/GoogleSheetIntegrationCard";
 import MetaIntegrationCard from "./settings/components/MetaIntegrationCard";
 import YouCanIntegrationCard from "./settings/components/YouCanIntegrationCard";
 import ShopifyIntegrationCard from "./settings/components/ShopifyIntegrationCard";
+import type { ShippingCarrier } from "../lib/types";
 
 const TABS = ["Profile", "Workspace", "Integrations", "Notifications"] as const;
 const ACCENT_PRESETS = ["#DB6A8F", "#00B57F", "#3B82F6", "#F59E0B", "#8B5CF6"];
@@ -221,7 +223,7 @@ function WorkspaceTab() {
   const [name, setName] = useState(workspace?.name ?? "");
   const [shippingEnabled, setShippingEnabled] = useState<boolean>(workspace?.shipping_enabled ?? true);
   const [showShippingColumn, setShowShippingColumn] = useState<boolean>(workspace?.show_shipping_column ?? false);
-  const [carrier, setCarrier] = useState<"ozon" | "coliaty">((workspace?.carrier as "ozon" | "coliaty") ?? "ozon");
+  const [carrier, setCarrier] = useState<ShippingCarrier>((workspace?.carrier as ShippingCarrier) ?? "ozon");
   const [statusLanguage, setStatusLanguage] = useState<"en" | "fr">((workspace?.status_language as "en" | "fr") ?? "en");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -253,7 +255,7 @@ function WorkspaceTab() {
     setName(workspace?.name ?? "");
     setShippingEnabled(workspace?.shipping_enabled ?? true);
     setShowShippingColumn(workspace?.show_shipping_column ?? false);
-    setCarrier((workspace?.carrier as "ozon" | "coliaty") ?? "ozon");
+    setCarrier((workspace?.carrier as ShippingCarrier) ?? "ozon");
     setStatusLanguage((workspace?.status_language as "en" | "fr") ?? "en");
   }, [workspace?.id, workspace?.name, workspace?.carrier, workspace?.status_language]);
 
@@ -516,12 +518,13 @@ function WorkspaceTab() {
               <div>
                 <select
                   value={carrier}
-                  onChange={(e) => setCarrier(e.target.value as "ozon" | "coliaty")}
+                  onChange={(e) => setCarrier(e.target.value as ShippingCarrier)}
                   disabled={!canEditWorkspace}
                   className="rounded-lg border border-base-border bg-base-raised px-3 py-2 text-[13px] text-ink focus:border-brand-accent/50 focus:outline-none disabled:opacity-60"
                 >
                   <option value="ozon">Ozon Express</option>
                   <option value="coliaty">Coliaty</option>
+                  <option value="forcelog">ForceLog</option>
                 </select>
               </div>
             </div>
@@ -662,13 +665,13 @@ function IntegrationsTab() {
 
         <OzonShippingIntegrationCard />
         <ColiatyShippingIntegrationCard />
+        <ForceLogShippingIntegrationCard />
         <GoogleSheetIntegrationCard />
         <MetaIntegrationCard />
         <ShopifyIntegrationCard />
 
         {/* Local Folder Placeholders */}
         <PlaceholderIntegrationCard name="Ameex" description="Advanced domestic logistics and fulfillment operations provider." logoSrc={IconAmeex} />
-        <PlaceholderIntegrationCard name="ForceLog" description="Specialized B2B logistics and distribution platform integration." logoSrc={IconForcelog} />
         <PlaceholderIntegrationCard name="Livo" description="Shipment tracking and customer satisfaction updates." logoSrc={IconLivo} />
         <PlaceholderIntegrationCard name="Digylog" description="Smart supply chain management and automated logistics." logoSrc={IconDigylog} />
 
