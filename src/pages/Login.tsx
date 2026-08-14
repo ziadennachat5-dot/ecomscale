@@ -7,7 +7,7 @@ import { useTheme } from "../hooks/useTheme";
 
 // NOTE: adjust this relative path if Login.tsx does not live in `src/pages/`.
 // It must resolve to the project asset at `src/assets/1.png`.
-import heroImage from "../assets/ChatGPT Image Aug 9, 2026, 09_03_26 PM.png";
+import heroImage from "../assets/ChatGPT Image Aug 9, 2026, 09_03_26 PM.webp";
 
 /* -------------------------------------------------------------------------
  * Small presentational helpers (kept local so this file is a drop-in

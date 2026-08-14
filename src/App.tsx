@@ -8,11 +8,11 @@ import { PermissionGuard } from "./components/PermissionGuard";
 import { FounderRoute } from "./components/FounderRoute";
 import { AdminProLayout } from "./components/AdminProLayout";
 
-import Login from "./pages/Login";
-import DemoDashboard from "./pages/DemoDashboard";
-import OAuthCallback from "./pages/OAuthCallback";
-import Disabled from "./pages/Disabled";
-import AccessDenied from "./pages/AccessDenied";
+const Login = lazy(() => import("./pages/Login"));
+const DemoDashboard = lazy(() => import("./pages/DemoDashboard"));
+const OAuthCallback = lazy(() => import("./pages/OAuthCallback"));
+const Disabled = lazy(() => import("./pages/Disabled"));
+const AccessDenied = lazy(() => import("./pages/AccessDenied"));
 import { OrdersProvider } from "./contexts/OrdersContext";
 const EcomOSLanding = lazy(() => import("./pages/ecomos_landing_2.jsx"));
 
@@ -80,15 +80,15 @@ export default function App() {
         <AuthProvider>
           <Routes>
             <Route path="/" element={<LoadablePage><EcomOSLanding /></LoadablePage>} />
-            <Route path="/login" element={<Login />} />
-            <Route path="/demo-dashboard" element={<DemoDashboard />} />
-            <Route path="/disabled" element={<Disabled />} />
-            <Route path="/403" element={<AccessDenied />} />
+            <Route path="/login" element={<LoadablePage><Login /></LoadablePage>} />
+            <Route path="/demo-dashboard" element={<LoadablePage><DemoDashboard /></LoadablePage>} />
+            <Route path="/disabled" element={<LoadablePage><Disabled /></LoadablePage>} />
+            <Route path="/403" element={<LoadablePage><AccessDenied /></LoadablePage>} />
             <Route path="/landing-page/:id" element={<LoadablePage><PublicLandingPage /></LoadablePage>} />
 
             {/* OAuth redirect landing pages — must match GOOGLE_REDIRECT_URI / YOUCAN_REDIRECT_URI exactly (path only; host changes per environment). */}
-            <Route path="/api/google/callback" element={<OAuthCallback provider="google" />} />
-            <Route path="/api/youcan/callback" element={<OAuthCallback provider="youcan" />} />
+            <Route path="/api/google/callback" element={<LoadablePage><OAuthCallback provider="google" /></LoadablePage>} />
+            <Route path="/api/youcan/callback" element={<LoadablePage><OAuthCallback provider="youcan" /></LoadablePage>} />
 
             <Route
               element={

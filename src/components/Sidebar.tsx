@@ -28,7 +28,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import ecomosLogo from "../assets/ecomos_logo_137x32.png";
-import ecomosIconMark from "../assets/AppStore_iOS_1024x1024.png";
+import ecomosIconMark from "../assets/AppStore_iOS_1024x1024.webp";
 
 // ─── Nav Data ─────────────────────────────────────────────────────────────────
 
@@ -112,6 +112,7 @@ function NavLinkItem({
       title={collapsed ? link.label : undefined}
       aria-label={link.label}
       onMouseEnter={getPrefetchHandler(link.to)}
+      onFocus={getPrefetchHandler(link.to)}
       onClick={onNavigate}
       className={({ isActive }) =>
         [

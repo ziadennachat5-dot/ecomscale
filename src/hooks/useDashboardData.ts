@@ -168,11 +168,16 @@ export function useDashboardData(startDate?: Date, endDate?: Date): DashboardDat
       supabase
         .from("products")
         .select("id, sku, cost, name, stock, low_stock_threshold")
-        .eq("workspace_id", wid),
+        .eq("workspace_id", wid)
+        .order("name")
+        .limit(100), // ← Pagination: charge seulement 100 produits pour l'affichage initial
       supabase
         .from("meta_campaigns")
         .select("id, campaign_name, status, spend, results, cost_per_result")
-        .eq("workspace_id", wid),
+        .eq("workspace_id", wid)
+        .eq("status", "ACTIVE") // ← Filtre: seulement les campagnes actives
+        .order("campaign_name")
+        .limit(50), // ← Pagination: charge seulement 50 campagnes actives
     ]);
 
     console.log("[Dashboard] Orders query result:", ordersRes);
