@@ -16,6 +16,13 @@ export function calculateOrderShipping(order: any, workspaceId?: string): number
 
     // As explicitly requested: only calculate shipping cost for "Delivered" orders
     if (internalStatus === 'DELIVERED') {
+        const rawShippingCost = order?.shipping_cost;
+        const persistedShippingCost = rawShippingCost === null || rawShippingCost === undefined || rawShippingCost === ""
+            ? null
+            : Number(rawShippingCost);
+        if (persistedShippingCost !== null && Number.isFinite(persistedShippingCost) && persistedShippingCost >= 0) {
+            return persistedShippingCost;
+        }
         // Use Smart Shipping Engine if workspaceId is provided
         if (workspaceId) {
             const result = getSmartShippingCostSync({

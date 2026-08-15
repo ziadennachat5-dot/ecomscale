@@ -76,6 +76,9 @@ function getProviderDisplayName(providerId: string): string {
   const names: Record<string, string> = {
     'ozon': 'Ozon Express',
     'coliaty': 'Coliaty',
+    'forcelog': 'ForceLog',
+    'ameex': 'Ameex',
+    'sendit': 'Sendit',
     'amana': 'Amana',
     'jibli': 'Jibli',
     'cathedis': 'Cathedis',

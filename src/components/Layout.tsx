@@ -7,6 +7,7 @@ import { AdminPreviewBanner } from "./AdminPreviewBanner";
 import { SupportTicketLauncher } from "./SupportTicketLauncher";
 import { AnnouncementTray } from "./AnnouncementTray";
 import { ActivityTracker } from "./ActivityTracker";
+import { PageContent } from "./PageContent";
 import { useAuth } from "../hooks/useAuth";
 import { useTheme } from "../hooks/useTheme";
 import { supabase } from "../lib/supabase";
@@ -74,7 +75,7 @@ function PullToRefresh({ children }: { children: React.ReactNode }) {
   }, [pullProgress, isRefreshing]);
 
   return (
-    <div ref={containerRef} className="h-full w-full overflow-y-auto relative">
+    <div ref={containerRef} className="relative h-full min-h-0 w-full overflow-y-auto overscroll-contain">
       <div
         className="absolute top-0 left-0 w-full flex justify-center items-end pb-3 overflow-hidden transition-all duration-100 ease-out z-50 pointer-events-none"
         style={{ height: pullProgress > 0 ? pullProgress + 20 : 0, opacity: pullProgress / 80 }}
@@ -83,7 +84,7 @@ function PullToRefresh({ children }: { children: React.ReactNode }) {
           <RefreshCw size={16} className={isRefreshing ? "" : "transform rotate-180"} style={{ transform: isRefreshing ? '' : `rotate(${pullProgress * 3}deg)` }} />
         </div>
       </div>
-      <div className="transition-transform duration-100 ease-out h-full" style={{ transform: `translateY(${pullProgress}px)` }}>
+      <div className="min-h-full w-full transition-transform duration-100 ease-out" style={{ transform: `translateY(${pullProgress}px)` }}>
         {children}
       </div>
     </div>
@@ -379,23 +380,25 @@ export function Layout() {
   }, [workspace?.id, workspace?.google_sheet_url, workspace?.google_sheet_autosync]);
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-brand-background text-text-main">
+    <div className="flex h-dvh min-h-0 w-full overflow-hidden bg-base-surface text-text-main">
       <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col w-full">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-base-surface">
         <ActivityTracker />
         <EnhancedHeader />
         <AdminPreviewBanner />
         <AnnouncementTray />
-        <main className="flex-1 overflow-hidden md:overflow-y-auto w-full">
-          <div className="md:hidden h-full w-full">
+        <main className="min-h-0 min-w-0 flex-1 overflow-hidden bg-base-surface">
+          <div className="h-full w-full md:hidden">
             <PullToRefresh>
-              <div className="w-full px-4 py-4">
+              <PageContent className="h-full min-h-full">
                 <Outlet />
-              </div>
+              </PageContent>
             </PullToRefresh>
           </div>
-          <div className="hidden md:block h-full px-6 py-6">
-            <Outlet />
+          <div className="hidden h-full w-full overflow-y-auto overscroll-contain md:block">
+            <PageContent className="h-full min-h-full">
+              <Outlet />
+            </PageContent>
           </div>
         </main>
       </div>

@@ -16,7 +16,7 @@ export function ProfilePictureUploader({
   fullName,
   onAvatarChange 
 }: ProfilePictureUploaderProps) {
-  const { profile, workspace } = useAuth();
+  const { profile, workspace, refreshProfile } = useAuth();
   const [isUploading, setIsUploading] = useState(false);
   const [isRemoving, setIsRemoving] = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
@@ -37,6 +37,7 @@ export function ProfilePictureUploader({
       if (result.success && result.avatarUrl) {
         toast.success('Profile picture updated successfully');
         onAvatarChange?.(result.avatarUrl);
+        await refreshProfile();
       } else {
         toast.error(result.error || 'Failed to upload profile picture');
       }
@@ -46,7 +47,7 @@ export function ProfilePictureUploader({
     } finally {
       setIsUploading(false);
     }
-  }, [profile?.id, workspace?.id, onAvatarChange]);
+  }, [profile?.id, workspace?.id, onAvatarChange, refreshProfile]);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -76,6 +77,7 @@ export function ProfilePictureUploader({
       if (result.success) {
         toast.success('Profile picture removed');
         onAvatarChange?.(null);
+        await refreshProfile();
       } else {
         toast.error(result.error || 'Failed to remove profile picture');
       }

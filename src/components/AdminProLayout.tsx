@@ -141,7 +141,13 @@ export function AdminProLayout() {
 
         <div className="border-t border-base-border p-3">
           <div className={`flex items-center gap-3 rounded-xl bg-base-raised p-2.5 ${collapsed ? "justify-center" : ""}`}>
-            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-brand-accent/15 text-xs font-bold text-brand-accent">{(profile?.full_name || session?.user?.email || "F").slice(0, 1).toUpperCase()}</div>
+            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-brand-accent/15 text-xs font-bold text-brand-accent overflow-hidden">
+              {profile?.avatar_url ? (
+                <img src={profile.avatar_url} alt="Profile" className="h-full w-full object-cover" />
+              ) : (
+                (profile?.full_name || session?.user?.email || "F").slice(0, 1).toUpperCase()
+              )}
+            </div>
             {!collapsed && <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold">{profile?.full_name || "Founder"}</p><p className="truncate text-[11px] text-ink-faint">Founder account</p></div>}
             {!collapsed && <button onClick={() => void exitAdmin()} title="Sign out" className="rounded-md p-1.5 text-ink-faint hover:bg-danger/10 hover:text-danger"><LogOut size={16} /></button>}
           </div>

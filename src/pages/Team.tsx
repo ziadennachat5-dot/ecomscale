@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../hooks/useAuth";
 import { useTeamData, type TeamMember } from "../hooks/useTeamData";
@@ -8,6 +9,7 @@ import { Modal } from "../components/Modal";
 import { toast } from "../components/Toast";
 import type { WorkspaceInvitation, TeamRole } from "../lib/types";
 import { getUserInitials } from "../services/avatarService";
+import { CallReviewPanel } from "./confirmation/CallReviewPanel";
 import {
   UserPlus, Clock, X, Send, CheckCircle, XCircle, Trash2, Edit3, Lock,
   Unlock, Users, Trophy, Activity, LayoutDashboard, Shield, Star,
@@ -17,7 +19,7 @@ import {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-type Tab = "overview" | "assignment" | "leaderboard" | "auditlog";
+type Tab = "overview" | "assignment" | "leaderboard" | "auditlog" | "callreview";
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string }> = {
   online: { label: "Online", color: "text-emerald-400", dot: "bg-emerald-400" },
@@ -192,13 +194,14 @@ function MemberCard({
 
 export default function Team() {
   const { workspace, profile, session } = useAuth();
+  const navigate = useNavigate();
   const {
     members, invitations, assignments, activityLog, performanceMap, loading,
     reload, updateMemberStatus, updateMemberRole, removeMember, setInvitations,
   } = useTeamData();
 
-  const isOwner = profile?.role === "owner";
-  const isAdmin = isOwner || profile?.role === "supervisor";
+  const isOwner = profile?.role === "owner" || profile?.role === "founder";
+  const isAdmin = ["owner", "supervisor", "admin", "manager", "founder"].includes(profile?.role || "");
 
   const [tab, setTab] = useState<Tab>("overview");
   const [search, setSearch] = useState("");
@@ -334,6 +337,7 @@ export default function Team() {
     { id: "assignment", label: "Order Assignment", icon: <Target size={14} /> },
     { id: "leaderboard", label: "Leaderboard", icon: <Trophy size={14} /> },
     { id: "auditlog", label: "Audit Log", icon: <Activity size={14} /> },
+    ...(isAdmin ? [{ id: "callreview" as const, label: "Call Review", icon: <MessageSquare size={14} /> }] : []),
   ] as const;
 
   return (
@@ -659,6 +663,19 @@ export default function Team() {
       )}
 
       {/* ── Member Profile Side Panel ─────────────────────────────────────── */}
+      {tab === "callreview" && isAdmin && workspace?.id && (
+        <CallReviewPanel
+          workspaceId={workspace.id}
+          agents={members.map((member) => ({
+            id: member.id,
+            fullName: member.full_name || member.email || "Agent",
+            avatarUrl: member.avatar_url,
+            role: member.role,
+          }))}
+          onOpenOrder={(orderId) => navigate(`/confirmation?order=${encodeURIComponent(orderId)}`)}
+        />
+      )}
+
       {selectedMember && (
         <div className="fixed inset-0 z-50 flex justify-end" onClick={() => setSelectedMember(null)}>
           <div

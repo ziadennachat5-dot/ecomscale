@@ -15,7 +15,7 @@ export type OrderStatus =
   | "refused"
   | "new";
 
-export type ShippingCarrier = "ozon" | "coliaty" | "forcelog";
+export type ShippingCarrier = "ozon" | "coliaty" | "forcelog" | "ameex" | "sendit";
 
 export interface Workspace {
   id: string;
@@ -108,6 +108,7 @@ export interface Order {
   workspace_id: string;
   order_number: string;
   customer_id: string | null;
+  customer_name?: string | null;
   city: string | null;
   total: number;
   status: OrderStatus;

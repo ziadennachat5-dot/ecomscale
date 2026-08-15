@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { CheckCircle2, Loader2, RefreshCw, Zap, AlertCircle, MoreHorizontal, X } from "lucide-react";
-import IconYouCan from "../../../assets/integrationicon/imgi_32_youcan.png";
+import { getIntegrationLogo } from "../../../lib/integrationLogos";
 import { useAuth } from "../../../hooks/useAuth";
 import { supabase } from "../../../lib/supabase";
 import { toast } from "../../../components/Toast";
@@ -149,7 +149,7 @@ function YouCanIntegrationCard() {
 
         <div className="flex flex-col pb-4">
           <div className="mb-4 flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-base-raised overflow-hidden border border-base-border/50">
-            <img src={IconYouCan} alt="YouCan" className="h-full w-full object-cover" />
+            <img src={getIntegrationLogo("youcan") || ""} alt="YouCan" className="h-full w-full object-contain" />
           </div>
           <div className="flex flex-col gap-1.5">
             <h3 className="text-[16px] font-semibold tracking-tight text-ink leading-none">YouCan Store</h3>
@@ -206,7 +206,7 @@ function YouCanIntegrationCard() {
             {/* Header */}
             <div className="flex items-center gap-4 px-7 py-6 border-b border-base-border/60 bg-base-raised/30">
               <div className="h-11 w-11 rounded-2xl overflow-hidden border border-base-border/50 flex-shrink-0">
-                <img src={IconYouCan} alt="YouCan" className="h-full w-full object-cover" />
+                <img src={getIntegrationLogo("youcan") || ""} alt="YouCan" className="h-full w-full object-contain" />
               </div>
               <div className="flex-1">
                 <h2 className="text-[18px] font-bold text-ink">YouCan Store</h2>

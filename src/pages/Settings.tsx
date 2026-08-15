@@ -1,6 +1,6 @@
 import { FormEvent, useState, useEffect } from "react";
 import { CheckCircle2, ExternalLink, User, Building2, Lock, Save, X, Loader2, Store, Truck, RefreshCw, Star } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { PageHeader } from "../components/PageHeader";
 import { useIntegrations } from "../hooks/useIntegrations";
 import { useTheme } from "../hooks/useTheme";
@@ -14,10 +14,13 @@ import { ProfilePictureUploader } from "../components/ProfilePictureUploader";
 import OzonShippingIntegrationCard from "./settings/components/OzonShippingIntegrationCard";
 import ColiatyShippingIntegrationCard from "./settings/components/ColiatyShippingIntegrationCard";
 import ForceLogShippingIntegrationCard from "./settings/components/ForceLogShippingIntegrationCard";
+import AmeexShippingIntegrationCard from "./settings/components/AmeexShippingIntegrationCard";
+import SenditShippingIntegrationCard from "./settings/components/SenditShippingIntegrationCard";
 import GoogleSheetIntegrationCard from "./settings/components/GoogleSheetIntegrationCard";
 import MetaIntegrationCard from "./settings/components/MetaIntegrationCard";
 import YouCanIntegrationCard from "./settings/components/YouCanIntegrationCard";
 import ShopifyIntegrationCard from "./settings/components/ShopifyIntegrationCard";
+import { getIntegrationLogo } from "../lib/integrationLogos";
 import type { ShippingCarrier } from "../lib/types";
 
 const TABS = ["Profile", "Workspace", "Integrations", "Notifications"] as const;
@@ -31,8 +34,14 @@ function isValidHex(value: string) {
 type Tab = (typeof TABS)[number];
 
 export default function Settings() {
-  const [tab, setTab] = useState<Tab>("Profile");
-  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const resolvedTab = TABS.find((value) => value.toLowerCase() === requestedTab?.toLowerCase()) ?? "Profile";
+  const [tab, setTab] = useState<Tab>(resolvedTab);
+
+  useEffect(() => {
+    setTab(resolvedTab);
+  }, [resolvedTab]);
 
   return (
     <div>
@@ -55,7 +64,7 @@ export default function Settings() {
 
       {tab === "Profile" && <ProfileTab />}
       {tab === "Workspace" && <WorkspaceTab />}
-      {tab === "Integrations" && <IntegrationsTab />}
+      {tab === "Integrations" && <IntegrationsTab autoOpenAmeex={searchParams.get("carrier") === "ameex"} initialAmeexCity={searchParams.get("city") ?? ""} />}
       {tab === "Notifications" && (
         <ComingNext title="Notifications" subtitle="SMS and email alerts for new orders. Coming next." />
       )}
@@ -234,15 +243,9 @@ function WorkspaceTab() {
     profile.role === "owner" ||
     profile.role === "supervisor" ||
     profile.role === "admin" ||
+    profile.role === "founder" ||
     profile.role === "super_admin"
   );
-
-  console.log("Workspace Settings Debug:", {
-    profile: profile,
-    profileRole: profile?.role,
-    canEditWorkspace,
-    workspaceId: workspace?.id
-  });
 
   // Workspace reset state
   const [showResetModal, setShowResetModal] = useState(false);
@@ -257,7 +260,14 @@ function WorkspaceTab() {
     setShowShippingColumn(workspace?.show_shipping_column ?? false);
     setCarrier((workspace?.carrier as ShippingCarrier) ?? "ozon");
     setStatusLanguage((workspace?.status_language as "en" | "fr") ?? "en");
-  }, [workspace?.id, workspace?.name, workspace?.carrier, workspace?.status_language]);
+  }, [
+    workspace?.id,
+    workspace?.name,
+    workspace?.shipping_enabled,
+    workspace?.show_shipping_column,
+    workspace?.carrier,
+    workspace?.status_language,
+  ]);
 
   const { accent, setAccent } = useTheme();
   const workspaceAccentKey = workspace?.id ? `${WORKSPACE_ACCENT_PREFIX}${workspace.id}` : ACCENT_PRESETS[0];
@@ -362,67 +372,91 @@ function WorkspaceTab() {
   const handleSave = async (e: FormEvent) => {
     e.preventDefault();
     if (!workspace) return;
+    if (!canEditWorkspace) {
+      setError("Only workspace owners, administrators, supervisors, and founders can change workspace settings.");
+      return;
+    }
     setBusy(true);
     setError(null);
 
     const trimmedName = name.trim();
+    if (!trimmedName) {
+      setBusy(false);
+      setError("Workspace name is required.");
+      return;
+    }
 
-    const { error } = await supabase
-      .from("workspaces")
-      .update({ name: trimmedName, shipping_enabled: shippingEnabled, show_shipping_column: showShippingColumn, carrier, status_language: statusLanguage })
-      .eq("id", workspace.id);
+    try {
+      const { data, error: updateError } = await supabase
+        .from("workspaces")
+        .update({ name: trimmedName, shipping_enabled: shippingEnabled, show_shipping_column: showShippingColumn, carrier, status_language: statusLanguage })
+        .eq("id", workspace.id)
+        .select("id")
+        .maybeSingle();
+      if (updateError) throw updateError;
+      if (!data) throw new Error("Settings were not saved. You do not have permission to update this workspace.");
 
-    setBusy(false);
-    if (error) {
-      setError(error.message);
-    } else {
       setSaved(true);
       setName(trimmedName);
-      // Force a complete profile and workspace reload
       await refreshProfile();
       setTimeout(() => setSaved(false), 2500);
+    } catch (saveError: any) {
+      setError(saveError?.message || "Could not save workspace settings.");
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <div className="flex flex-col gap-4 max-w-lg">
-      <div className="rounded-xl border border-base-border bg-base-surface p-5 shadow-card">
-        <div className="flex items-center gap-2 mb-4">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-accent/15 text-brand-accent">
-            <Building2 size={15} />
+    <div className="w-full pb-10">
+      <div className="flex flex-col gap-4 border-b border-base-border bg-gradient-to-r from-brand-accent/10 via-base-surface to-base-surface py-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 flex-none items-center justify-center rounded-xl bg-brand-accent text-white shadow-sm">
+              <Building2 size={20} />
+            </div>
+            <div>
+              <div className="text-[17px] font-semibold text-ink">Workspace control center</div>
+              <div className="mt-1 text-[13px] text-ink-muted">Set your workspace identity, delivery tools, and display preferences.</div>
+            </div>
           </div>
-          <div className="text-[14px] font-semibold text-ink">Workspace Settings</div>
+          <div className={`inline-flex w-fit items-center gap-2 rounded-full border px-3 py-1.5 text-[12px] font-medium ${canEditWorkspace ? "border-success/25 bg-success/10 text-success" : "border-base-border bg-base-raised text-ink-muted"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${canEditWorkspace ? "bg-success" : "bg-ink-faint"}`} />
+            {canEditWorkspace ? "Editing enabled" : "View only"}
+          </div>
         </div>
 
-        <form onSubmit={handleSave} className="flex flex-col gap-3">
-          <div>
-            <label className="mb-1 block text-[12px] text-ink-muted">Workspace Name</label>
-            <input
-              type="text"
-              required
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-lg border border-base-border bg-base-raised px-3 py-2 text-[13px] text-ink focus:border-brand-accent/50 focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-[12px] text-ink-muted">Workspace ID</label>
-            <input
-              type="text"
-              value={workspace?.id ?? ""}
-              disabled
-              className="w-full rounded-lg border border-base-border bg-base-raised px-3 py-2 text-[13px] text-ink-muted cursor-not-allowed opacity-60 font-mono text-[11px]"
-            />
+      <form onSubmit={handleSave} className="space-y-5 py-5 sm:py-6">
+          <div className="grid gap-4 sm:grid-cols-[minmax(0,1.35fr)_minmax(220px,0.65fr)]">
+            <div>
+              <label className="mb-1.5 block text-[12px] font-medium text-ink">Workspace name</label>
+              <input
+                type="text"
+                required
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                disabled={!canEditWorkspace}
+                className="w-full rounded-xl border border-base-border bg-base-raised px-3.5 py-2.5 text-[13px] text-ink outline-none transition focus:border-brand-accent focus:ring-2 focus:ring-brand-accent/15 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-[12px] font-medium text-ink">Workspace ID</label>
+              <input
+                type="text"
+                value={workspace?.id ?? ""}
+                disabled
+                className="w-full rounded-xl border border-base-border bg-base-raised px-3.5 py-2.5 font-mono text-[11px] text-ink-muted opacity-70"
+              />
+            </div>
           </div>
 
-          <div className="mt-4 rounded-xl border border-base-border bg-base-surface p-4">
+          <div className="rounded-2xl border border-base-border bg-base-surface p-4 sm:p-5">
             <div className="flex items-center gap-2 mb-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-accent/15 text-brand-accent">
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-accent/15 text-brand-accent">
                 <Store size={15} />
               </div>
               <div>
-                <div className="text-[14px] font-semibold text-ink">Customize Your UX</div>
-                <div className="text-[12px] text-ink-muted">Pick a brand accent color and refresh the platform styling instantly.</div>
+                <div className="text-[14px] font-semibold text-ink">Brand appearance</div>
+                <div className="text-[12px] text-ink-muted">Choose the accent used across this workspace. Changes apply instantly.</div>
               </div>
             </div>
 
@@ -432,7 +466,7 @@ function WorkspaceTab() {
                   key={color}
                   type="button"
                   onClick={() => handleAccentChange(color)}
-                  className={`h-10 w-10 rounded-xl border ${selectedAccent === color ? "border-brand-accent shadow-sm" : "border-base-border"}`}
+                  className={`h-10 w-10 rounded-xl border-2 transition-transform hover:scale-105 ${selectedAccent === color ? "border-ink shadow-sm ring-2 ring-brand-accent/20" : "border-transparent"}`}
                   style={{ backgroundColor: color }}
                   aria-label={`Select accent ${color}`}
                 />
@@ -455,91 +489,92 @@ function WorkspaceTab() {
             </div>
           </div>
 
-          <div className="mt-4 rounded-xl border border-base-border bg-base-surface p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-base-raised text-ink-muted">
-                <Truck size={15} />
+          <div className="rounded-2xl border border-base-border bg-base-surface p-4 sm:p-5">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-accent/15 text-brand-accent">
+                  <Truck size={17} />
+                </div>
+                <div>
+                  <div className="text-[14px] font-semibold text-ink">Modules & delivery</div>
+                  <div className="text-[12px] text-ink-muted">Turn delivery features on, then choose how orders are processed.</div>
+                </div>
               </div>
-              <div>
-                <div className="text-[14px] font-semibold text-ink">Modules</div>
-                <div className="text-[12px] text-ink-muted">Enable or disable optional modules for this workspace.</div>
-              </div>
+              <span className="w-fit rounded-full bg-base-raised px-2.5 py-1 text-[11px] font-medium text-ink-muted">Workspace settings</span>
             </div>
 
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-[13px] font-medium text-ink">Shipping Module</div>
-                <div className="text-[12px] text-ink-muted">Enable or disable the Shipping section for this workspace.</div>
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div className="flex min-h-[108px] items-center justify-between gap-4 rounded-xl border border-base-border bg-base-raised/60 p-4">
+                <div>
+                  <div className="flex items-center gap-2 text-[13px] font-semibold text-ink">
+                    Shipping module
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${shippingEnabled ? "bg-success/10 text-success" : "bg-base-border text-ink-muted"}`}>{shippingEnabled ? "Active" : "Off"}</span>
+                  </div>
+                  <p className="mt-1 max-w-sm text-[12px] leading-5 text-ink-muted">Allow the team to use delivery and carrier workflows in this workspace.</p>
+                </div>
+                <label className="relative inline-flex flex-none cursor-pointer items-center">
+                  <input
+                    type="checkbox"
+                    checked={shippingEnabled}
+                    onChange={(e) => setShippingEnabled(e.target.checked)}
+                    disabled={!canEditWorkspace}
+                    className="sr-only"
+                    aria-label="Enable shipping module"
+                  />
+                  <span className={`block h-7 w-12 rounded-full transition-colors ${shippingEnabled ? "bg-brand-accent" : "bg-base-border"} ${!canEditWorkspace ? "cursor-not-allowed opacity-60" : ""}`} />
+                  <span className={`absolute left-0.5 top-0.5 h-6 w-6 rounded-full bg-white shadow-sm transition-transform ${shippingEnabled ? "translate-x-5" : "translate-x-0"}`} />
+                </label>
               </div>
-              <div>
-                <label className="inline-flex items-center gap-3">
-                  <span className="relative">
-                    <input
-                      type="checkbox"
-                      checked={shippingEnabled}
-                      onChange={(e) => setShippingEnabled(e.target.checked)}
-                      disabled={!canEditWorkspace}
-                      className="sr-only"
-                    />
-                    <span className={`block w-12 h-7 rounded-full transition-colors ${shippingEnabled ? 'bg-brand-accent' : 'bg-base-border'}`} />
-                    <span className={`absolute left-0 top-0.5 w-6 h-6 bg-white rounded-full transform transition-transform ${shippingEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
-                  </span>
+
+              <div className="flex min-h-[108px] items-center justify-between gap-4 rounded-xl border border-base-border bg-base-raised/60 p-4">
+                <div>
+                  <div className="flex items-center gap-2 text-[13px] font-semibold text-ink">
+                    Delivery page & order costs
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${showShippingColumn ? "bg-success/10 text-success" : "bg-base-border text-ink-muted"}`}>{showShippingColumn ? "Shown" : "Hidden"}</span>
+                  </div>
+                  <p className="mt-1 max-w-sm text-[12px] leading-5 text-ink-muted">Show Shipping in the sidebar and the delivery-cost column on Orders.</p>
+                </div>
+                <label className="relative inline-flex flex-none cursor-pointer items-center">
+                  <input
+                    type="checkbox"
+                    checked={showShippingColumn}
+                    onChange={(e) => setShowShippingColumn(e.target.checked)}
+                    disabled={!canEditWorkspace}
+                    className="sr-only"
+                    aria-label="Show shipping page and costs"
+                  />
+                  <span className={`block h-7 w-12 rounded-full transition-colors ${showShippingColumn ? "bg-brand-accent" : "bg-base-border"} ${!canEditWorkspace ? "cursor-not-allowed opacity-60" : ""}`} />
+                  <span className={`absolute left-0.5 top-0.5 h-6 w-6 rounded-full bg-white shadow-sm transition-transform ${showShippingColumn ? "translate-x-5" : "translate-x-0"}`} />
                 </label>
               </div>
             </div>
 
-            <div className="flex items-center justify-between mt-4">
-              <div>
-                <div className="text-[13px] font-medium text-ink">Enable Shipping Page</div>
-                <div className="text-[12px] text-ink-muted">Show the Shipping page in the sidebar and Shipping cost column in Orders table.</div>
-              </div>
-              <div>
-                <label className="inline-flex items-center gap-3">
-                  <span className="relative">
-                    <input
-                      type="checkbox"
-                      checked={showShippingColumn}
-                      onChange={(e) => setShowShippingColumn(e.target.checked)}
-                      disabled={!canEditWorkspace}
-                      className="sr-only"
-                    />
-                    <span className={`block w-12 h-7 rounded-full transition-colors ${showShippingColumn ? 'bg-brand-accent' : 'bg-base-border'}`} />
-                    <span className={`absolute left-0 top-0.5 w-6 h-6 bg-white rounded-full transform transition-transform ${showShippingColumn ? 'translate-x-5' : 'translate-x-0'}`} />
-                  </span>
-                </label>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between mt-4">
-              <div>
-                <div className="text-[13px] font-medium text-ink">Shipping Carrier</div>
-                <div className="text-[12px] text-ink-muted">Select the shipping carrier for this workspace.</div>
-              </div>
-              <div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div className="rounded-xl border border-base-border bg-base-raised/60 p-4">
+                <div className="text-[13px] font-semibold text-ink">Shipping carrier</div>
+                <div className="mt-1 text-[12px] leading-5 text-ink-muted">The provider used for new delivery operations.</div>
                 <select
                   value={carrier}
                   onChange={(e) => setCarrier(e.target.value as ShippingCarrier)}
                   disabled={!canEditWorkspace}
-                  className="rounded-lg border border-base-border bg-base-raised px-3 py-2 text-[13px] text-ink focus:border-brand-accent/50 focus:outline-none disabled:opacity-60"
+                  className="mt-3 w-full rounded-lg border border-base-border bg-base-surface px-3 py-2.5 text-[13px] text-ink outline-none transition focus:border-brand-accent focus:ring-2 focus:ring-brand-accent/15 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <option value="ozon">Ozon Express</option>
                   <option value="coliaty">Coliaty</option>
                   <option value="forcelog">ForceLog</option>
+                  <option value="ameex">Ameex</option>
+                  <option value="sendit">Sendit</option>
                 </select>
               </div>
-            </div>
 
-            <div className="flex items-center justify-between mt-4">
-              <div>
-                <div className="text-[13px] font-medium text-ink">Order Status Language</div>
-                <div className="text-[12px] text-ink-muted">Select the language for order status labels.</div>
-              </div>
-              <div>
+              <div className="rounded-xl border border-base-border bg-base-raised/60 p-4">
+                <div className="text-[13px] font-semibold text-ink">Order status language</div>
+                <div className="mt-1 text-[12px] leading-5 text-ink-muted">Language used for delivery statuses throughout the workspace.</div>
                 <select
                   value={statusLanguage}
                   onChange={(e) => setStatusLanguage(e.target.value as "en" | "fr")}
                   disabled={!canEditWorkspace}
-                  className="rounded-lg border border-base-border bg-base-raised px-3 py-2 text-[13px] text-ink focus:border-brand-accent/50 focus:outline-none disabled:opacity-60"
+                  className="mt-3 w-full rounded-lg border border-base-border bg-base-surface px-3 py-2.5 text-[13px] text-ink outline-none transition focus:border-brand-accent focus:ring-2 focus:ring-brand-accent/15 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <option value="en">English</option>
                   <option value="fr">Français</option>
@@ -553,29 +588,31 @@ function WorkspaceTab() {
           )}
           <button
             type="submit"
-            disabled={busy}
-            className="flex items-center gap-1.5 self-start rounded-lg bg-brand-accent px-3 py-1.5 text-[12.5px] font-medium text-white hover:bg-brand-accentHover disabled:opacity-60"
+            disabled={busy || !canEditWorkspace}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-brand-accent px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm transition hover:bg-brand-accentHover disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
           >
             <Save size={13} />
             {saved ? "Saved ✓" : busy ? "Saving…" : "Save Workspace"}
           </button>
 
-          <div className="mt-5 border-t border-base-border pt-5">
-            <div className="mb-3 text-[13px] font-medium text-ink">Reset Workspace</div>
-            <div className="mb-3 text-[12px] text-ink-muted">
-              This permanently deletes all workspace data and returns it to a brand-new state. This action cannot be undone.
+          <div className="flex flex-col gap-4 rounded-2xl border border-danger/25 bg-danger/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-[13px] font-semibold text-ink">Danger zone</div>
+              <div className="mt-1 max-w-2xl text-[12px] leading-5 text-ink-muted">
+                Resetting permanently deletes this workspace's data and returns it to a brand-new state. This cannot be undone.
+              </div>
             </div>
             <button
               type="button"
-              disabled={!workspace}
+              disabled={!workspace || !canEditWorkspace}
               onClick={() => setShowResetModal(true)}
-              className="flex items-center gap-2 rounded-lg bg-danger px-3 py-2 text-[13px] font-medium text-white hover:bg-danger/90 disabled:opacity-60"
+              className="inline-flex flex-none items-center justify-center gap-2 rounded-xl bg-danger px-3.5 py-2.5 text-[12.5px] font-semibold text-white transition hover:bg-danger/90 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <RefreshCw size={13} />
-              Reset Workspace
+              Reset workspace
             </button>
           </div>
-        </form>
+      </form>
 
         {/* Reset Modals */}
         <WorkspaceResetModal
@@ -594,7 +631,6 @@ function WorkspaceTab() {
           onClose={() => setShowResetSuccess(false)}
           onNavigateToOrders={handleNavigateToOrders}
         />
-      </div>
     </div>
   );
 }
@@ -621,15 +657,10 @@ function ComingNext({ title, subtitle }: { title: string; subtitle: string }) {
 
 // ─── Shared Imports for New UI ────────────────────────────────────────────────
 import { MoreHorizontal } from "lucide-react";
-import IconGoogleSheet from "../assets/integrationicon/imgi_33_google sheet.png";
-import IconAmeex from "../assets/integrationicon/imgi_28_ameex.jpg";
-import IconForcelog from "../assets/integrationicon/imgi_29_forcelog.jpg";
-import IconLivo from "../assets/integrationicon/imgi_30_livo.png";
-import IconDigylog from "../assets/integrationicon/imgi_31_digylog.jpg";
 
 // ─── Integrations Tab ─────────────────────────────────────────────────────────
 
-function IntegrationsTab() {
+function IntegrationsTab({ autoOpenAmeex = false, initialAmeexCity = "" }: { autoOpenAmeex?: boolean; initialAmeexCity?: string }) {
   const { statuses, loading, disconnect } = useIntegrations();
   const google = statuses["google"];
 
@@ -655,7 +686,7 @@ function IntegrationsTab() {
         <GenericIntegrationCard
           name="Google"
           description="Export reports to Google Sheets and connect Google Ads spend."
-          logoSrc={IconGoogleSheet}
+          logoSrc={getIntegrationLogo("google")}
           connected={!!google?.connected}
           connectedAt={google?.connected_at}
           loading={loading}
@@ -666,14 +697,15 @@ function IntegrationsTab() {
         <OzonShippingIntegrationCard />
         <ColiatyShippingIntegrationCard />
         <ForceLogShippingIntegrationCard />
+        <AmeexShippingIntegrationCard autoOpen={autoOpenAmeex} initialCity={initialAmeexCity} />
+        <SenditShippingIntegrationCard />
         <GoogleSheetIntegrationCard />
         <MetaIntegrationCard />
         <ShopifyIntegrationCard />
 
         {/* Local Folder Placeholders */}
-        <PlaceholderIntegrationCard name="Ameex" description="Advanced domestic logistics and fulfillment operations provider." logoSrc={IconAmeex} />
-        <PlaceholderIntegrationCard name="Livo" description="Shipment tracking and customer satisfaction updates." logoSrc={IconLivo} />
-        <PlaceholderIntegrationCard name="Digylog" description="Smart supply chain management and automated logistics." logoSrc={IconDigylog} />
+        <PlaceholderIntegrationCard name="Livo" description="Shipment tracking and customer satisfaction updates." logoSrc={getIntegrationLogo("livo")} />
+        <PlaceholderIntegrationCard name="Digylog" description="Smart supply chain management and automated logistics." logoSrc={getIntegrationLogo("digylog")} />
 
         {/* Global Placeholders */}
         <PlaceholderIntegrationCard name="Facebook Ads" description="Sync your product catalog and optimize dynamic retargeting campaigns automatically." logoUrl="https://upload.wikimedia.org/wikipedia/commons/b/b8/2021_Facebook_icon.svg" />
@@ -720,7 +752,7 @@ function GenericIntegrationCard({
       <div className="flex flex-col pb-4">
         <div className="mb-4 flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-base-raised overflow-hidden border border-base-border/50">
           {(logoSrc || logoUrl) ? (
-            <img src={logoSrc || logoUrl} alt={name} className="h-full w-full object-cover" />
+            <img src={logoSrc || logoUrl} alt={name} className="h-full w-full object-contain" />
           ) : (
             <Store size={22} className="text-ink-muted" />
           )}
@@ -814,7 +846,7 @@ function PlaceholderIntegrationCard({
         <div className="flex flex-col pb-4">
           <div className="mb-4 flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-base-raised overflow-hidden border border-base-border/50">
             {(logoSrc || logoUrl) ? (
-              <img src={logoSrc || logoUrl} alt={name} className="h-full w-full object-cover" />
+              <img src={logoSrc || logoUrl} alt={name} className="h-full w-full object-contain" />
             ) : (
               <Store size={22} className="text-ink-muted" />
             )}

@@ -21,6 +21,7 @@ import {
   normalizeAllowedSections,
 } from "../lib/rbac";
 import { toast } from "../components/Toast";
+import { prefetchRoute } from "./usePrefetch";
 
 interface PreviewWorkspaceState {
   profile: Profile | null;
@@ -96,6 +97,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const sessionUserIdRef = useRef<string | undefined>(undefined);
   const previewWorkspaceRef = useRef<PreviewWorkspaceState | null>(null);
   const sessionRef = useRef<typeof session>(null);
+  const profileLoadRef = useRef<{ userId: string; promise: Promise<void> } | null>(null);
+  const invitationLookupAttemptedRef = useRef(new Set<string>());
 
 
   const clearAuthState = useCallback(async () => {
@@ -115,7 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     navigate("/disabled", { replace: true });
   }, [navigate]);
 
-  const loadProfileAndWorkspace = useCallback(async (userId: string) => {
+  const loadProfileAndWorkspaceInternal = useCallback(async (userId: string) => {
     setPermissionsLoading(true);
 
     const { data: { session: currentSession } } = await supabase.auth.getSession();
@@ -172,7 +175,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setPermissionsLoading(false);
         return;
       }
-      return loadProfileAndWorkspace(userId);
+      return loadProfileAndWorkspaceInternal(userId);
     }
 
     if (profileData.is_active === false) {
@@ -191,16 +194,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let localProfile = profileData as Profile;
     const userEmail = currentSession?.user?.email ?? null;
 
-    if (userEmail) {
+    // Invitation discovery is not part of normal workspace boot. It is tried
+    // once per authenticated user through a narrowly scoped RPC, so a policy
+    // failure can neither block auth nor repeatedly generate 403 requests.
+    if (userEmail && !invitationLookupAttemptedRef.current.has(userId)) {
+      invitationLookupAttemptedRef.current.add(userId);
       try {
         const { data: invitation, error: invitationErr } = await supabase
-          .from("workspace_invitations")
-          .select("id, workspace_id, email, role, allowed_sections, status, created_at, user_id")
-          .ilike("email", userEmail)
-          .eq("status", "pending")
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+          .rpc("get_my_pending_workspace_invitation");
 
         if (invitationErr) {
           const errDetail = invitationErr?.message ?? invitationErr?.details ?? JSON.stringify(invitationErr);
@@ -211,18 +212,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
         }
 
-        if (invitation?.id) {
+        const pendingInvitation = Array.isArray(invitation) ? invitation[0] : invitation;
+        if (pendingInvitation?.id) {
           // Role, workspace, and permission changes are privileged. Accept the
           // invitation through a security-definer RPC instead of allowing the
           // browser to update those profile columns directly.
           const { error: acceptErr } = await supabase.rpc("accept_workspace_invitation", {
-            p_invitation_id: invitation.id,
+            p_invitation_id: pendingInvitation.id,
           });
 
           if (acceptErr) {
             console.error("[useAuth] Accept invitation failed:", acceptErr);
           } else {
-            return loadProfileAndWorkspace(userId);
+            return loadProfileAndWorkspaceInternal(userId);
           }
         }
       } catch (error) {
@@ -375,6 +377,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // ← stable: reads previewWorkspace and clearAuthState through refs
 
+  // getSession(), INITIAL_SESSION, SIGNED_IN and React StrictMode can all race
+  // during boot. Keep one in-flight initialization per user instead of issuing
+  // duplicate profile, workspace and invitation requests.
+  const loadProfileAndWorkspace = useCallback(async (userId: string) => {
+    const active = profileLoadRef.current;
+    if (active?.userId === userId) return active.promise;
+
+    const promise = loadProfileAndWorkspaceInternal(userId);
+    profileLoadRef.current = { userId, promise };
+    try {
+      await promise;
+    } finally {
+      if (profileLoadRef.current?.promise === promise) profileLoadRef.current = null;
+    }
+  }, [loadProfileAndWorkspaceInternal]);
+
   const refreshProfile = useCallback(async () => {
     const uid = sessionRef.current?.user?.id;
     if (!uid) return;
@@ -422,17 +440,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Registered ONCE on mount. Uses refs to always call the latest function.
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      if (data.session?.user?.id) {
-        loadProfileRef.current!(data.session.user.id).finally(() => setLoading(false));
-      } else {
-        setLoading(false);
-      }
-    });
+    let disposed = false;
+
+    void supabase.auth.getSession()
+      .then(({ data }) => {
+        if (disposed) return;
+        setSession(data.session);
+        if (data.session?.user?.id) {
+          return loadProfileRef.current!(data.session.user.id);
+        }
+      })
+      .catch((error) => {
+        if (!disposed) console.error("[useAuth] Unable to restore session:", error);
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
+      });
 
     const { data: sub } = supabase.auth.onAuthStateChange((event, sess) => {
       setSession(sess);
+      // getSession owns initial hydration. Token refreshes retain the same user
+      // and must never restart the complete profile/workspace lifecycle.
+      if (event === "INITIAL_SESSION" || event === "TOKEN_REFRESHED") return;
+
       if (sess?.user?.id) {
         if (event === "SIGNED_IN") void supabase.rpc("touch_last_login");
         loadProfileRef.current!(sess.user.id);
@@ -468,11 +498,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .subscribe();
 
     return () => {
+      disposed = true;
       sub.subscription.unsubscribe();
-      profileChannel.unsubscribe();
+      void profileChannel.unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // ← intentionally empty: listeners must be registered exactly once
+
+  // Warm the high-frequency route chunks after the application becomes ready.
+  // Timers space work out to avoid a post-login request/bundle burst.
+  useEffect(() => {
+    if (loading || !workspace?.id) return;
+    const routes = ["/dashboard", "/orders", "/confirmation", "/delivering"];
+    const timers = routes.map((route, index) => window.setTimeout(() => prefetchRoute(route), index * 250));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [loading, workspace?.id]);
 
   const selectWorkspacePreview = useCallback((nextProfile: Profile, nextWorkspace: Workspace) => {
     setPreviewWorkspace({ profile: nextProfile, workspace: nextWorkspace });

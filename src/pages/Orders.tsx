@@ -135,7 +135,9 @@ function isMissingAddressColumnError(error: { message?: string } | null | undefi
   return Boolean(error?.message && /address/i.test(error.message) && /(schema cache|column)/i.test(error.message));
 }
 
-export async function runGoogleSheetSync(
+const googleSheetSyncRequests = new Map<string, Promise<{ inserted: number; errors: string[] }>>();
+
+async function runGoogleSheetSyncInternal(
   wid: string,
   url: string,
   onProgress?: (msg: string) => void
@@ -246,13 +248,11 @@ export async function runGoogleSheetSync(
   let hasCustomers = false;
   let hasOrderItems = false;
 
-  const { data: probe, error: probeErr } = await supabase
+  const { error: probeErr } = await supabase
     .from("orders")
-    .select("*")
+    .select("customer_id")
     .limit(1);
-  if (!probeErr && probe && probe.length > 0) {
-    hasCustomerId = "customer_id" in probe[0];
-  }
+  hasCustomerId = !probeErr;
   if (hasCustomerId) {
     const { error: cErr } = await supabase.from("customers").select("phone").limit(1);
     hasCustomers = !cErr;
@@ -264,6 +264,26 @@ export async function runGoogleSheetSync(
   const newItems = rows
     .map((row, index) => ({ row, sheetIndex: index + 1 }))
     .filter((item) => item.sheetIndex > maxRowIndex);
+
+  // Resolve the sheet's known customers in one request. The import must never
+  // make one customer lookup per order row.
+  const existingCustomersByPhone = new Map<string, { id: string; phone: string | null }>();
+  if (hasCustomerId && hasCustomers) {
+    const phones = Array.from(new Set(newItems
+      .map(({ row }) => phoneIdx !== -1 && row[phoneIdx] != null ? String(row[phoneIdx]).trim() : "")
+      .filter((phone) => Boolean(phone) && phone.toLowerCase() !== "null")));
+
+    for (let start = 0; start < phones.length; start += 200) {
+      const { data: customers } = await supabase
+        .from("customers")
+        .select("id, phone")
+        .eq("workspace_id", wid)
+        .in("phone", phones.slice(start, start + 200));
+      for (const customer of customers ?? []) {
+        if (customer.phone) existingCustomersByPhone.set(customer.phone, customer);
+      }
+    }
+  }
 
   let inserted = 0;
   const rowErrors: string[] = [];
@@ -319,21 +339,19 @@ export async function runGoogleSheetSync(
     // ── Customer ─────────────────────────────────────────────────────────────
     let customerId: string | null = null;
     if (hasCustomerId && hasCustomers && phone) {
-      const { data: ec } = await supabase
-        .from("customers")
-        .select("*")
-        .eq("workspace_id", wid)
-        .eq("phone", phone)
-        .maybeSingle();
+      const ec = existingCustomersByPhone.get(phone);
       if (ec) {
-        customerId = ec.id ?? null;
+        customerId = ec.id;
       } else {
         const { data: nc, error: ncErr } = await supabase
           .from("customers")
           .insert({ name: customerName, phone, city, workspace_id: wid })
-          .select("*")
+          .select("id, phone")
           .single();
-        if (!ncErr && nc) customerId = nc.id ?? null;
+        if (!ncErr && nc) {
+          customerId = nc.id;
+          if (nc.phone) existingCustomersByPhone.set(nc.phone, nc);
+        }
       }
     }
 
@@ -361,6 +379,7 @@ export async function runGoogleSheetSync(
     const payload: Record<string, unknown> = {
       order_number: orderNumber,
       workspace_id: wid,
+      customer_name: customerName,
       city: city || null,
       ozon_city_id: ozon_city_id || null,
       city_name: city_name || null,
@@ -406,6 +425,28 @@ export async function runGoogleSheetSync(
   return { inserted, errors: rowErrors };
 }
 
+/**
+ * The app shell owns Google Sheet polling. A shared single-flight guard keeps
+ * StrictMode remounts, visibility events and manual triggers from importing
+ * the same sheet twice for one workspace.
+ */
+export function runGoogleSheetSync(
+  wid: string,
+  url: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ inserted: number; errors: string[] }> {
+  const key = `${wid}:${url}`;
+  const active = googleSheetSyncRequests.get(key);
+  if (active) return active;
+
+  const request = runGoogleSheetSyncInternal(wid, url, onProgress)
+    .finally(() => {
+      if (googleSheetSyncRequests.get(key) === request) googleSheetSyncRequests.delete(key);
+    });
+  googleSheetSyncRequests.set(key, request);
+  return request;
+}
+
 export default function Orders() {
   const { workspace, refreshProfile } = useAuth();
   const { globalOrders: allOrders, loading, reloadGlobalOrders: reload } = useGlobalOrders();
@@ -444,7 +485,7 @@ export default function Orders() {
       // Search filter
       if (search) {
         const searchLower = search.toLowerCase();
-        const haystack = `${o.order_number} ${o.customer?.name} ${o.customer?.phone} ${o.city} ${o.address}`.toLowerCase();
+        const haystack = `${o.order_number} ${o.customer?.name ?? o.customer_name ?? ''} ${o.customer?.phone} ${o.city} ${o.address}`.toLowerCase();
         return haystack.includes(searchLower);
       }
 
@@ -485,7 +526,7 @@ export default function Orders() {
 
   // Listen for global auto-sync reloads
   useEffect(() => {
-    const onReload = () => reload();
+    const onReload = () => reload(true);
     window.addEventListener("trigger-order-reload", onReload);
     return () => window.removeEventListener("trigger-order-reload", onReload);
   }, [reload]);
@@ -586,7 +627,7 @@ export default function Orders() {
                   className="border-b border-base-border last:border-0 hover:bg-base-raised/60 cursor-pointer transition-colors"
                 >
                   <td className="px-4 py-3 font-mono text-ink">{o.order_number}</td>
-                  <td className="px-4 py-3 text-ink">{o.customer?.name ?? "—"}</td>
+                  <td className="px-4 py-3 text-ink">{o.customer?.name ?? o.customer_name ?? "—"}</td>
                   <td className="px-4 py-3 text-ink-muted font-mono">{o.phone ?? o.customer?.phone ?? "—"}</td>
                   <td className="px-4 py-3 text-ink-muted">{o.city ?? "—"}</td>
                   <td className="px-4 py-3 text-ink-muted">{o.address ? o.address : "No address"}</td>
@@ -651,7 +692,7 @@ export default function Orders() {
             >
               <div className="flex justify-between items-start mb-4">
                 <div>
-                  <div className="text-[16px] font-bold text-ink mb-0.5">{o.customer?.name || "Unknown"}</div>
+                  <div className="text-[16px] font-bold text-ink mb-0.5">{o.customer?.name ?? o.customer_name ?? "Unknown"}</div>
                   <div className="text-[13px] text-ink-muted">{o.city || "No City"} • <span className="font-mono text-ink-muted">{o.phone ?? o.customer?.phone ?? "No phone"}</span></div>
                   <div className="mt-2 text-[12px] text-ink-muted">Address: {o.address ? o.address : "No address"}</div>
                   {showShippingColumn && (
@@ -700,7 +741,7 @@ export default function Orders() {
           onClose={() => setShowNew(false)}
           onCreated={() => {
             setShowNew(false);
-            reload();
+            reload(true);
           }}
         />
       )}
@@ -711,7 +752,7 @@ export default function Orders() {
           onClose={() => setEditingOrder(null)}
           onUpdated={() => {
             setEditingOrder(null);
-            reload();
+            reload(true);
           }}
         />
       )}
@@ -721,6 +762,7 @@ export default function Orders() {
 
 function NewOrderModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const { workspace } = useAuth();
+  const carrier = workspace?.carrier || 'ozon';
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [cityValue, setCityValue] = useState<CitySelectorValue>({ ozon_city_id: null, city_name: "" });
@@ -739,7 +781,7 @@ function NewOrderModal({ onClose, onCreated }: { onClose: () => void; onCreated:
       return;
     }
 
-    if (!cityValue.ozon_city_id) {
+    if (carrier === 'ozon' ? !cityValue.ozon_city_id : !cityValue.carrier_city_id) {
       setError("Please select a city from the dropdown");
       return;
     }
@@ -786,13 +828,20 @@ function NewOrderModal({ onClose, onCreated }: { onClose: () => void; onCreated:
           shippingCost = workspaceData?.business_delivery_fee || 35;
         }
       }
+      if (carrier === 'sendit' && cityValue.carrier_city_price != null) {
+        shippingCost = cityValue.carrier_city_price;
+      }
 
       const orderNumber = `#${Math.floor(1000 + Math.random() * 9000)}`;
       const orderPayload = {
         order_number: orderNumber,
         customer_id: customer.id,
+        customer_name: name,
         city: cityValue.city_name,
-        ozon_city_id: cityValue.ozon_city_id,
+        raw_city: cityValue.raw_city || cityValue.city_name,
+        provider_city_id: carrier === 'sendit' ? String(cityValue.carrier_city_id) : null,
+        ozon_city_id: carrier === 'ozon' ? cityValue.ozon_city_id : null,
+        coliaty_city_id: carrier === 'coliaty' ? cityValue.carrier_city_id : null,
         city_name: cityValue.city_name,
         address,
         total: Number(total),
@@ -833,6 +882,7 @@ function NewOrderModal({ onClose, onCreated }: { onClose: () => void; onCreated:
             onChange={setCityValue}
             placeholder="Search city..."
             required
+            carrier={carrier}
           />
         </div>
         <div>
@@ -867,8 +917,9 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
   const [phone, setPhone] = useState(order.phone || order.customer?.phone || "");
   const [cityValue, setCityValue] = useState<CitySelectorValue>({
     ozon_city_id: (order as any).ozon_city_id || null,
-    carrier_city_id: (order as any).coliaty_city_id || null,
-    city_name: (order as any).city_name || order.city || ""
+    carrier_city_id: carrier === 'sendit' ? Number((order as any).provider_city_id) || null : (order as any).coliaty_city_id || null,
+    city_name: (order as any).city_name || order.city || "",
+    raw_city: (order as any).raw_city || (order as any).city_name || order.city || "",
   });
   const [address, setAddress] = useState(order.address || "");
   const [total, setTotal] = useState(String(order.total));
@@ -900,9 +951,9 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
       console.log("[EditOrderModal] order.order_number:", order.order_number);
       console.log("[EditOrderModal] workspace?.id:", workspace?.id);
 
-      // Use the correct primary key: "Order ID" (with space)
+      const orderKey = (order as any)["Order ID"] ? '"Order ID"' : 'id';
       const orderId = (order as any)["Order ID"] || order.id;
-      console.log("[EditOrderModal] Using order ID for update:", orderId);
+      console.log("[EditOrderModal] Using order key for update:", orderKey, orderId);
 
       if (!orderId) {
         throw new Error("Order ID is missing. Cannot update order. order.id=" + order.id + ", order['Order ID']=" + (order as any)["Order ID"]);
@@ -912,8 +963,8 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
       console.log("[EditOrderModal] Verifying order exists with workspace filter...");
       const { data: existingOrder, error: checkError } = await supabase
         .from("orders")
-        .select('"Order ID", workspace_id, order_number')
-        .eq('"Order ID"', orderId)
+        .select(`${orderKey}, workspace_id, order_number`)
+        .eq(orderKey, orderId)
         .eq("workspace_id", workspace?.id)
         .single();
 
@@ -964,10 +1015,16 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
           shippingCost = workspaceData?.business_delivery_fee || 35;
         }
       }
+      if (carrier === 'sendit' && cityValue.carrier_city_price != null) {
+        shippingCost = cityValue.carrier_city_price;
+      }
 
       const updatePayload = {
+        customer_name: name,
         city: cityValue.city_name,
-        ozon_city_id: carrier === 'coliaty' ? null : cityValue.ozon_city_id,
+        raw_city: cityValue.raw_city || cityValue.city_name,
+        provider_city_id: carrier === 'sendit' ? String(cityValue.carrier_city_id) : null,
+        ozon_city_id: carrier === 'ozon' ? cityValue.ozon_city_id : null,
         coliaty_city_id: carrier === 'coliaty' ? cityValue.carrier_city_id : null,
         city_name: cityValue.city_name,
         address,
@@ -981,10 +1038,10 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
       console.log("[EditOrderModal] Update payload:", updatePayload);
 
       console.log("[EditOrderModal] Executing update query...");
-      console.log("[EditOrderModal] Query: UPDATE orders SET ... WHERE \"Order ID\" = ", orderId, " AND workspace_id = ", workspace?.id);
+      console.log("[EditOrderModal] Query: UPDATE orders SET ... WHERE", orderKey, "=", orderId, "AND workspace_id =", workspace?.id);
 
       const query = supabase.from("orders").update(updatePayload);
-      const response = await query.eq('"Order ID"', orderId).eq("workspace_id", workspace?.id).select();
+      const response = await query.eq(orderKey, orderId).eq("workspace_id", workspace?.id).select();
 
       console.log("[EditOrderModal] Update response:", response);
       console.log("[EditOrderModal] Response data:", response.data);
@@ -995,8 +1052,11 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
         console.error("[EditOrderModal] Update failed:", response.error);
         if (isMissingAddressColumnError(response.error)) {
           const fallbackPayload = {
+            customer_name: name,
             city: cityValue.city_name,
-            ozon_city_id: carrier === 'coliaty' ? null : cityValue.ozon_city_id,
+            raw_city: cityValue.raw_city || cityValue.city_name,
+            provider_city_id: carrier === 'sendit' ? String(cityValue.carrier_city_id) : null,
+            ozon_city_id: carrier === 'ozon' ? cityValue.ozon_city_id : null,
             coliaty_city_id: carrier === 'coliaty' ? cityValue.carrier_city_id : null,
             city_name: cityValue.city_name,
             total: Number(total),
@@ -1060,10 +1120,11 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
 
       // CRITICAL: Verify the order exists with workspace filter
       console.log("[EditOrderModal] Verifying order exists before delete...");
+      const orderKey = (order as any)["Order ID"] ? '"Order ID"' : 'id';
       const { data: existingOrder, error: checkError } = await supabase
         .from("orders")
-        .select('"Order ID", workspace_id, order_number')
-        .eq('"Order ID"', orderId)
+        .select(`${orderKey}, workspace_id, order_number`)
+        .eq(orderKey, orderId)
         .eq("workspace_id", workspace?.id)
         .single();
 
@@ -1082,10 +1143,10 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
 
       console.log("[EditOrderModal] Order verified, proceeding with delete");
       console.log("[EditOrderModal] Executing delete query...");
-      console.log("[EditOrderModal] Query: DELETE FROM orders WHERE \"Order ID\" = ", orderId, " AND workspace_id = ", workspace?.id);
+      console.log("[EditOrderModal] Query: DELETE FROM orders WHERE", orderKey, "=", orderId, "AND workspace_id =", workspace?.id);
 
       const query = supabase.from("orders").delete();
-      const response = await query.eq('"Order ID"', orderId).eq("workspace_id", workspace?.id).select();
+      const response = await query.eq(orderKey, orderId).eq("workspace_id", workspace?.id).select();
 
       console.log("[EditOrderModal] Delete response:", response);
       console.log("[EditOrderModal] Delete data:", response.data);
@@ -1126,7 +1187,7 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
             placeholder="Search city..."
             required
             showWarning={Boolean(
-              (carrier === 'coliaty' ? !cityValue.carrier_city_id : !cityValue.ozon_city_id) &&
+              (carrier === 'ozon' ? !cityValue.ozon_city_id : !cityValue.carrier_city_id) &&
               cityValue.city_name
             )}
             carrier={carrier}

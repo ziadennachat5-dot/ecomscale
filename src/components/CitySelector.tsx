@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import { Search, MapPin, AlertCircle } from "lucide-react";
 import { supabase } from "../lib/supabase";
 import type { ShippingCarrier } from "../lib/types";
+import { getSenditCities, getSenditStatus, type SenditDistrict } from "../services/senditService";
+import { useAuth } from "../hooks/useAuth";
 
 export interface OzonCity {
   id: number;
@@ -25,10 +27,21 @@ export interface ForceLogCity {
   same_city_price: number | null;
 }
 
+export interface AmeexCity {
+  ameex_city_id: number;
+  display_name: string;
+  normalized_city: string;
+  aliases: string[];
+}
+
+export interface SenditCity extends SenditDistrict {}
+
 export interface CitySelectorValue {
   ozon_city_id?: number | null;
   carrier_city_id?: number | null;
+  carrier_city_price?: number | null;
   city_name: string;
+  raw_city?: string | null;
 }
 
 interface CitySelectorProps {
@@ -50,14 +63,17 @@ export function CitySelector({
   showWarning = false,
   carrier = 'ozon',
 }: CitySelectorProps) {
+  const { workspace } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [results, setResults] = useState<Array<OzonCity | ColiatyCity | ForceLogCity>>([]);
+  const [results, setResults] = useState<Array<OzonCity | ColiatyCity | ForceLogCity | AmeexCity | SenditCity>>([]);
   const [loading, setLoading] = useState(false);
   const [noResults, setNoResults] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const tableName = carrier === 'forcelog' ? 'forcelog_cities' : carrier === 'coliaty' ? 'coliaty_cities' : 'ozon_cities';
+  const isAmeex = carrier === 'ameex';
+  const isSendit = carrier === 'sendit';
+  const tableName = carrier === 'forcelog' ? 'forcelog_cities' : carrier === 'coliaty' ? 'coliaty_cities' : carrier === 'ameex' ? 'ameex_city_mappings' : 'ozon_cities';
   const hasCityId = carrier === 'ozon' ? value.ozon_city_id : value.carrier_city_id;
 
   // Load default cities on focus if empty
@@ -97,16 +113,27 @@ export function CitySelector({
   }, []);
 
   const loadDefaultCities = async () => {
+    console.log("[CitySelector] loadDefaultCities called", { carrier, isAmeex, tableName });
     setLoading(true);
     setNoResults(false);
 
     try {
+      if (isSendit) {
+        if (!workspace?.id) throw new Error("Workspace is not available.");
+        const status = await getSenditStatus(workspace.id);
+        const response = await getSenditCities(workspace.id, { pickupDistrictId: status.pickup_district_id });
+        setResults(response.data || []);
+        setNoResults((response.data || []).length === 0);
+        return;
+      }
+      const columnName = isAmeex ? "display_name" : "name";
+      console.log("[CitySelector] Querying table:", tableName, "with column:", columnName);
       const { data, error } = await supabase
         .from(tableName)
         .select("*")
-        .order("name")
-        .limit(50);
+        .order(columnName);
 
+      console.log("[CitySelector] Query result:", { data, error, dataLength: data?.length });
       if (error) throw error;
 
       setResults(data || []);
@@ -121,17 +148,28 @@ export function CitySelector({
   };
 
   const searchCities = async (query: string) => {
+    console.log("[CitySelector] searchCities called", { carrier, isAmeex, tableName, query });
     setLoading(true);
     setNoResults(false);
 
     try {
+      if (isSendit) {
+        if (!workspace?.id) throw new Error("Workspace is not available.");
+        const status = await getSenditStatus(workspace.id);
+        const response = await getSenditCities(workspace.id, { query, pickupDistrictId: status.pickup_district_id });
+        setResults(response.data || []);
+        setNoResults((response.data || []).length === 0);
+        return;
+      }
+      const columnName = isAmeex ? "display_name" : "name";
+      console.log("[CitySelector] Querying table:", tableName, "with column:", columnName, "query:", query);
       const { data, error } = await supabase
         .from(tableName)
         .select("*")
-        .ilike("name", `%${query}%`)
-        .order("name")
-        .limit(20);
+        .ilike(columnName, `%${query}%`)
+        .order(columnName);
 
+      console.log("[CitySelector] Search result:", { data, error, dataLength: data?.length });
       if (error) throw error;
 
       setResults(data || []);
@@ -146,7 +184,7 @@ export function CitySelector({
   };
 
   const saveToCityArabicNames = async (arabicName: string, carrierCityId: number) => {
-    if (carrier === 'ozon') return;
+    if (carrier === 'ozon' || carrier === 'ameex') return;
     
     try {
       // Check if mapping already exists
@@ -174,21 +212,52 @@ export function CitySelector({
     }
   };
 
-  const handleSelectCity = (city: OzonCity | ColiatyCity | ForceLogCity) => {
+  const saveSenditMapping = async (rawCity: string, city: SenditCity) => {
+    if (!workspace?.id || !rawCity.trim()) return;
+    const normalized = rawCity.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim();
+    if (!normalized) return;
+    await supabase.rpc("upsert_city_mapping", {
+      p_workspace_id: workspace.id,
+      p_provider_key: "sendit",
+      p_raw_city: rawCity,
+      p_normalized_raw_city: normalized,
+      p_provider_city_id: String(city.id),
+      p_provider_city_name: city.name,
+      p_provider_city_code: null,
+      p_confidence: 1,
+      p_source: "learned",
+    });
+  };
+
+  const handleSelectCity = (city: OzonCity | ColiatyCity | ForceLogCity | AmeexCity | SenditCity) => {
+    const cityName = 'display_name' in city ? city.display_name : city.name;
     const newValue: CitySelectorValue = {
-      city_name: city.name,
+      city_name: cityName,
+      raw_city: value.raw_city || value.city_name || searchQuery || cityName,
     };
 
-    if (carrier !== 'ozon') {
-      const providerCityId = 'provider_city_id' in city ? city.provider_city_id : city.id;
+    if (carrier === 'sendit') {
+      newValue.carrier_city_id = Number((city as SenditCity).id);
+      const quotedPrice = Number((city as SenditCity).price);
+      newValue.carrier_city_price = Number.isFinite(quotedPrice) ? quotedPrice : null;
+      newValue.ozon_city_id = null;
+      if (value.city_name) {
+        void saveToCityArabicNames(value.city_name, Number((city as SenditCity).id));
+        void saveSenditMapping(value.city_name, city as SenditCity);
+      }
+    } else if (carrier === 'ameex') {
+      newValue.carrier_city_id = (city as AmeexCity).ameex_city_id;
+      newValue.ozon_city_id = null;
+    } else if (carrier !== 'ozon') {
+      const providerCityId = 'provider_city_id' in city ? city.provider_city_id : (city as OzonCity | ColiatyCity).id;
       newValue.carrier_city_id = providerCityId;
       newValue.ozon_city_id = null;
       // Save mapping for future automatic resolution
       if (value.city_name) {
-        saveToCityArabicNames(value.city_name, city.id);
+        saveToCityArabicNames(value.city_name, providerCityId);
       }
     } else {
-      newValue.ozon_city_id = city.id;
+      newValue.ozon_city_id = (city as OzonCity | ColiatyCity).id;
       newValue.carrier_city_id = null;
     }
 
@@ -201,8 +270,10 @@ export function CitySelector({
   const handleClear = () => {
     const newValue: CitySelectorValue = {
       city_name: "",
+      raw_city: "",
       ozon_city_id: null,
       carrier_city_id: null,
+      carrier_city_price: null,
     };
     onChange(newValue);
     setSearchQuery("");
@@ -226,8 +297,10 @@ export function CitySelector({
             if (hasCityId) {
               const newValue: CitySelectorValue = {
                 city_name: e.target.value,
+                raw_city: e.target.value,
                 ozon_city_id: null,
                 carrier_city_id: null,
+                carrier_city_price: null,
               };
               onChange(newValue);
             }
@@ -274,21 +347,42 @@ export function CitySelector({
 
           {!loading && results.length > 0 && (
             <div className="py-1">
-              {results.map((city) => (
-                <button
-                  key={city.id}
-                  type="button"
-                  onClick={() => handleSelectCity(city)}
-                  className="w-full px-3 py-2 text-left text-[13px] text-ink hover:bg-brand-accent/10 focus:bg-brand-accent/10 focus:outline-none"
-                >
-                  <div className="font-medium">{city.name}</div>
-                  {carrier === 'ozon' && 'ref' in city && (
-                    <div className="text-[11px] text-ink-muted">
-                      {(city as OzonCity).ref} • Delivery: {(city as OzonCity).delivered_price} DH
-                    </div>
-                  )}
-                </button>
-              ))}
+              {results.map((city) => {
+                const cityName = 'display_name' in city ? city.display_name : city.name;
+                const cityKey = 'ameex_city_id' in city ? (city as AmeexCity).ameex_city_id : 
+                               'provider_city_id' in city ? (city as ForceLogCity).provider_city_id : 
+                               city.id;
+                return (
+                  <button
+                    key={cityKey}
+                    type="button"
+                    onClick={() => handleSelectCity(city)}
+                    className="w-full px-3 py-2 text-left text-[13px] text-ink hover:bg-brand-accent/10 focus:bg-brand-accent/10 focus:outline-none"
+                  >
+                    <div className="font-medium">{cityName}</div>
+                    {carrier === 'ozon' && 'ref' in city && (
+                      <div className="text-[11px] text-ink-muted">
+                        {(city as OzonCity).ref} • Delivery: {(city as OzonCity).delivered_price} DH
+                      </div>
+                    )}
+                    {carrier === 'forcelog' && 'code' in city && (
+                      <div className="text-[11px] text-ink-muted">
+                        {city.code} {city.delivered_price != null ? `• Delivery: ${city.delivered_price} DH` : ''}
+                      </div>
+                    )}
+                    {carrier === 'ameex' && 'ameex_city_id' in city && (
+                      <div className="text-[11px] text-ink-muted">
+                        ID: {(city as AmeexCity).ameex_city_id}
+                      </div>
+                    )}
+                    {carrier === 'sendit' && 'ville' in city && (
+                      <div className="text-[11px] text-ink-muted">
+                        {(city as SenditCity).ville || ''}{(city as SenditCity).price != null ? ` • Delivery: ${(city as SenditCity).price} DH` : ''}{(city as SenditCity).delais ? ` • ${(city as SenditCity).delais}` : ''}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>

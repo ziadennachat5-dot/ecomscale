@@ -952,8 +952,12 @@ export const EnhancedHeader = memo(function EnhancedHeader({ onMenuClick }: Enha
               aria-label={`Account menu for ${displayName}`}
               className="rounded-xl p-1 transition-colors hover:bg-base-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-base-surface"
             >
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-pink-500 to-pink-600 text-xs font-bold text-white ring-2 ring-transparent transition-all hover:ring-pink-500/30">
-                {profile?.full_name ? getUserInitials(profile.full_name) : profile?.email?.charAt(0).toUpperCase() || "U"}
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-pink-500 to-pink-600 text-xs font-bold text-white ring-2 ring-transparent transition-all hover:ring-pink-500/30 overflow-hidden">
+                {profile?.avatar_url ? (
+                  <img src={profile.avatar_url} alt={displayName} className="h-full w-full object-cover" />
+                ) : (
+                  profile?.full_name ? getUserInitials(profile.full_name) : profile?.email?.charAt(0).toUpperCase() || "U"
+                )}
               </div>
             </button>
 

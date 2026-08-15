@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, useCallback, useRef, us
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../hooks/useAuth";
 import type { Order } from "../lib/types";
+import { getCached, setCached } from "../lib/queryCache";
 
 interface OrdersContextValue {
     globalOrders: Order[];
@@ -24,31 +25,75 @@ function createDebounce(delay: number) {
     };
 }
 
+// This survives a development StrictMode remount and coordinates any brief
+// overlap between app-shell instances without widening the cache to another
+// workspace.
+const ordersLoadRequests = new Map<string, Promise<void>>();
+
 export function OrdersProvider({ children }: { children: ReactNode }) {
     const { workspace } = useAuth();
     const [globalOrders, setGlobalOrders] = useState<Order[]>([]);
     const [loading, setLoading] = useState(true);
     const isLoadingRef = useRef(false);
-    const loadRef = useRef<(() => Promise<void>) | null>(null);
+    const loadRef = useRef<((forceReload?: boolean) => Promise<void>) | null>(null);
     const hasLoadedRef = useRef(false);
+    const activeWorkspaceRef = useRef<string | null>(null);
 
     const load = useCallback(async (forceReload = false) => {
         if (isLoadingRef.current) return;
 
         if (!workspace?.id) {
+            activeWorkspaceRef.current = null;
+            hasLoadedRef.current = false;
             setGlobalOrders([]);
             setLoading(false);
             return;
         }
 
+        if (activeWorkspaceRef.current !== workspace.id) {
+            activeWorkspaceRef.current = workspace.id;
+            hasLoadedRef.current = false;
+        }
+
+        const cacheKey = `orders:${workspace.id}:list`;
+        const cachedOrders = getCached<Order[]>(cacheKey, true);
+        if (!forceReload && cachedOrders) {
+            setGlobalOrders(cachedOrders);
+            hasLoadedRef.current = true;
+            setLoading(false);
+            // A fresh cache avoids a request on every route switch. Stale data
+            // stays visible while the refresh below happens in the background.
+            if (getCached<Order[]>(cacheKey)) return;
+        }
+
         // Skip loading if we already have data (state preservation) unless forceReload is true
-        if (!forceReload && hasLoadedRef.current) {
+        if (!forceReload && hasLoadedRef.current && !cachedOrders) {
             setLoading(false);
             return;
         }
 
         isLoadingRef.current = true;
-        setLoading(true);
+        setLoading(!cachedOrders);
+
+        const existingRequest = ordersLoadRequests.get(cacheKey);
+        if (existingRequest) {
+            try {
+                await existingRequest;
+                const sharedOrders = getCached<Order[]>(cacheKey, true);
+                if (sharedOrders) {
+                    setGlobalOrders(sharedOrders);
+                    hasLoadedRef.current = true;
+                }
+            } finally {
+                isLoadingRef.current = false;
+                setLoading(false);
+            }
+            return;
+        }
+
+        let resolveRequest!: () => void;
+        const request = new Promise<void>((resolve) => { resolveRequest = resolve; });
+        ordersLoadRequests.set(cacheKey, request);
 
         try {
             let { data, error } = await supabase
@@ -57,6 +102,7 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
         "Order ID",
         order_number,
         customer_id,
+        customer_name,
         city,
         city_name,
         address,
@@ -73,7 +119,6 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
         ozon_city_id,
         coliaty_city_id,
         source,
-        ozon_raw_response,
         customers(id, name, phone, city),
         ozon_cities(id, name, delivered_price, returned_price, refused_price)
       `)
@@ -85,7 +130,7 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
                 // Fallback: flat query without joins
                 const fbRes = await supabase
                     .from("orders")
-                    .select('"Order ID", order_number, customer_id, city, city_name, address, total, status, delivery_status, shipping_status, phone, sku, product_variant, tracking_number, campaign_id, created_at, ozon_city_id, coliaty_city_id, source, ozon_raw_response')
+                    .select('"Order ID", order_number, customer_id, customer_name, city, city_name, address, total, status, delivery_status, shipping_status, phone, sku, product_variant, tracking_number, campaign_id, created_at, ozon_city_id, coliaty_city_id, source')
                     .eq("workspace_id", workspace.id)
                     .order("created_at", { ascending: false })
                     .limit(500);
@@ -99,7 +144,7 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
                     if (customerIds.length > 0 || phones.length > 0) {
                         let custQuery = supabase
                             .from("customers")
-                            .select("*")
+                            .select("id, name, phone, city")
                             .eq("workspace_id", workspace.id);
                         if (customerIds.length > 0 && phones.length > 0) {
                             custQuery = custQuery.or(
@@ -122,11 +167,18 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
 
                     data = fallbackData.map((o) => ({
                         ...o,
-                        customer: o.customer_id
-                            ? customersMap.get(o.customer_id)
-                            : o.phone
-                                ? customersMap.get(o.phone)
-                                : null,
+                        customer: (o.customer_id ? customersMap.get(o.customer_id) : undefined)
+                            || (o.phone ? customersMap.get(o.phone) : undefined)
+                            || (o.customer_name || o.phone
+                                ? {
+                                    id: o.customer_id || `order:${o["Order ID"]}`,
+                                    workspace_id: workspace.id,
+                                    name: o.customer_name || "Unknown customer",
+                                    phone: o.phone || null,
+                                    city: o.city_name || o.city || null,
+                                    created_at: o.created_at,
+                                }
+                                : null),
                     }));
                     error = null;
                 } else {
@@ -141,7 +193,16 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
                     const ozonCity = Array.isArray(rawCity) ? rawCity[0] : rawCity;
                     return {
                         ...o,
-                        customer: customer || null,
+                        customer: customer || (o.customer_name || o.phone
+                            ? {
+                                id: o.customer_id || `order:${o["Order ID"]}`,
+                                workspace_id: workspace.id,
+                                name: o.customer_name || "Unknown customer",
+                                phone: o.phone || null,
+                                city: o.city_name || o.city || null,
+                                created_at: o.created_at,
+                            }
+                            : null),
                         ozon_city: ozonCity || null,
                     };
                 });
@@ -188,8 +249,8 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
                     const resolvedId = o["Order ID"] || o.id;
                     const shipment = shipmentsMap.get(resolvedId) || shipmentsMap.get(o.id);
 
-                    let shippingCost = null;
-                    if (o.ozon_city) {
+                    let shippingCost = o.shipping_cost ?? null;
+                    if (shippingCost === null && o.ozon_city) {
                         const status = (o.delivery_status || o.status || "").toLowerCase();
                         if (status.includes('delivered') || status.includes('livre') || status.includes('livré')) {
                             shippingCost = o.ozon_city.delivered_price;
@@ -216,7 +277,7 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
                         shipping_status: o.shipping_status ?? null,
                         shipping_provider: o.shipping_provider ?? shipment?.provider ?? null,
                         delivery_status: o.delivery_status ?? shipment?.delivery_status ?? null,
-                        delivery_note_ref: o.delivery_note_ref ?? o.ozon_raw_response?.delivery_note_ref ?? null,
+                        delivery_note_ref: null,
                         shipping_cost: shippingCost,
                     };
                 });
@@ -235,12 +296,15 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
                     return b.order_number.localeCompare(a.order_number);
                 });
                 setGlobalOrders(sorted);
+                setCached(cacheKey, sorted, 120_000);
                 hasLoadedRef.current = true;
             } else {
                 if (error) console.error("[OrdersContext] Failed to load orders:", error);
                 setGlobalOrders([]);
             }
         } finally {
+            resolveRequest();
+            if (ordersLoadRequests.get(cacheKey) === request) ordersLoadRequests.delete(cacheKey);
             isLoadingRef.current = false;
             setLoading(false);
         }
@@ -286,14 +350,16 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
                     }
                     setGlobalOrders(prev => [newOrder, ...prev]);
                 } else if (payload.eventType === "UPDATE") {
+                    const previousOrder = payload.old as any;
                     setGlobalOrders(prev => prev.map(order =>
-                        (order.id === payload.old.id || order["Order ID"] === payload.old["Order ID"] || order.order_number === payload.old.order_number)
+                        (order.id === previousOrder.id || (order as any)["Order ID"] === previousOrder["Order ID"] || order.order_number === previousOrder.order_number)
                             ? { ...order, ...payload.new }
                             : order
                     ));
                 } else if (payload.eventType === "DELETE") {
+                    const previousOrder = payload.old as any;
                     setGlobalOrders(prev => prev.filter(order =>
-                        order.id !== payload.old.id && order["Order ID"] !== payload.old["Order ID"] && order.order_number !== payload.old.order_number
+                        order.id !== previousOrder.id && (order as any)["Order ID"] !== previousOrder["Order ID"] && order.order_number !== previousOrder.order_number
                     ));
                 }
             }

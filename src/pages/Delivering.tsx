@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Inbox,
   Download,
@@ -18,6 +19,9 @@ import {
   Clock,
   ExternalLink,
   Printer,
+  Pencil,
+  RotateCcw,
+  Trash2,
   X,
   ScanLine,
 } from "lucide-react";
@@ -51,10 +55,19 @@ const FINAL_SHIPPING_STATUSES = [
   'Archived'
 ].map(s => s.toLowerCase());
 
+// React StrictMode and route transitions can briefly mount two Delivering
+// instances. This workspace-level guard guarantees a single automatic timer.
+const activeAutoRefreshWorkspaces = new Set<string>();
+
 const isFinalShippingStatus = (status: string | null | undefined): boolean => {
   if (!status) return false;
   const normalized = normalizeShippingStatus(status) || status.toLowerCase();
-  return FINAL_SHIPPING_STATUSES.includes(normalized);
+  return ["DELIVERED", "REFUSED", "CANCELED", "RETURNED_TO_SENDER"].includes(normalized) || FINAL_SHIPPING_STATUSES.includes(normalized.toLowerCase());
+};
+
+const getUnmappedAmeexCity = (message: string): string | null => {
+  const match = /Ameex city is not mapped for "([^"]+)"/i.exec(message);
+  return match?.[1]?.trim() || null;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +212,9 @@ import {
 } from "../services/ozonService";
 import { syncOrderTracking } from "../services/ozonTrackingSync";
 import { syncColiatyTracking } from "../services/coliatyTrackingSync";
+import { createForceLogParcel, getForceLogPdf, getForceLogStatus, syncForceLogTracking } from "../services/forcelogService";
+import { AmeexApiError, createAmeexParcel, deleteAmeexParcel, editAmeexParcel, getAmeexStatus, printAmeexLabels, reconcileAmeexParcel, relaunchAmeexParcel, relaunchAmeexParcelForNewCustomer, requestAmeexPickup, syncAmeexMassTracking, syncAmeexTracking } from "../services/ameexService";
+import { createSenditDelivery, createSenditPickup, getSenditLabels, getSenditStatus, syncSenditMassTracking, syncSenditTracking } from "../services/senditService";
 import type { OzonParcelRequest } from "../types/ozon";
 import { SUPABASE_URL } from "../lib/supabase";
 import { getShippingPrice, formatPrice, calculateNetCOD, preloadCityPrices, getShippingPriceSync } from "../services/shippingPriceService";
@@ -460,6 +476,7 @@ export default function Delivering() {
   }
   const { orders, loading, reload } = useOrders({ status: "all" });
   const { workspace } = useAuth();
+  const navigate = useNavigate();
   const language = (workspace?.status_language || "en") as StatusLanguage;
 
   const [activeTab, setActiveTab] = useState<DeliveringTab>("all");
@@ -470,13 +487,17 @@ export default function Delivering() {
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const [refreshingAllCount, setRefreshingAllCount] = useState(0);
   const [isOpeningAllPdfs, setIsOpeningAllPdfs] = useState(false);
+  const [isOpeningForceLogLabels, setIsOpeningForceLogLabels] = useState(false);
+  const [isOpeningAmeexLabels, setIsOpeningAmeexLabels] = useState(false);
+  const [isOpeningSenditLabels, setIsOpeningSenditLabels] = useState(false);
   const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
   const [autoRefreshError, setAutoRefreshError] = useState<string | null>(null);
 
   const [visibleCount, setVisibleCount] = useState(50);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const autoRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const isAutoRefreshRunningRef = useRef(false);
+  const autoRefreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isShippingRefreshRunningRef = useRef(false);
+  const autoRefreshCallbackRef = useRef<() => void>(() => undefined);
 
   const handleScroll = () => {
     const el = scrollContainerRef.current;
@@ -488,6 +509,15 @@ export default function Delivering() {
   const [panelOrder, setPanelOrder] = useState<Order | null>(null);
   const [shippingPrice, setShippingPrice] = useState<number | null>(null);
   const [loadingShippingPrice, setLoadingShippingPrice] = useState(false);
+  const [ameexEditor, setAmeexEditor] = useState<{ order: Order; mode: "edit" | "relaunch-new" } | null>(null);
+  const [ameexForm, setAmeexForm] = useState<Record<string, string>>({});
+  const [ameexPickupOpen, setAmeexPickupOpen] = useState(false);
+  const [ameexPickup, setAmeexPickup] = useState({ city: "", address: "", phone: "", note: "" });
+  const [ameexActionBusy, setAmeexActionBusy] = useState(false);
+  const [ameexCitiesNeedingMapping, setAmeexCitiesNeedingMapping] = useState<string[]>([]);
+  const [senditPickupOpen, setSenditPickupOpen] = useState(false);
+  const [senditPickup, setSenditPickup] = useState({ name: "", address: "", phone: "", note: "" });
+  const [senditActionBusy, setSenditActionBusy] = useState(false);
 
   // ── Preload city prices on mount ───────────────────────────────────────────
   useEffect(() => {
@@ -544,8 +574,10 @@ export default function Delivering() {
   // Filter orders eligible for auto-refresh
   const getEligibleOrdersForAutoRefresh = useCallback((): Order[] => {
     return orders.filter(order => {
-      // Must have tracking number
-      const orderCarrier = (order as any).shipping_provider || workspace?.carrier || "ozon";
+      // Saved shipment provider is the source of truth. Do not track a new,
+      // unshipped order through the workspace's currently selected carrier.
+      const orderCarrier = String((order as any).shipping_provider || "").toLowerCase();
+      if (!orderCarrier) return false;
       const trackingField = orderCarrier === "coliaty" ? "coliaty_parcel_code" : "tracking_number";
       const trackingNumber = (order as any)[trackingField];
       
@@ -559,7 +591,7 @@ export default function Delivering() {
       
       return true;
     });
-  }, [orders, workspace?.carrier]);
+  }, [orders]);
 
   // ── Unified Shipping Status Refresh Function ─────────────────────────────────
   const refreshShippingStatuses = useCallback(async (ordersToRefresh: Order[] = []) => {
@@ -584,10 +616,56 @@ export default function Delivering() {
     let failureCount = 0;
     const failedOrders: string[] = [];
 
-    // Process orders in parallel
-    const refreshPromises = orders.map(async (order) => {
-      const orderCarrier = (order as any).shipping_provider || workspace?.carrier || "ozon";
+    // Ameex exposes a real MassTracking endpoint (maximum 25 codes). Send all
+    // eligible Ameex parcels through that provider route instead of issuing one
+    // browser-driven request per order.
+    const ameexOrders = orders.filter((order) => String((order as any).shipping_provider || "").toLowerCase() === "ameex");
+    if (ameexOrders.length > 0) {
+      try {
+        const result = await syncAmeexMassTracking(workspace?.id ?? "", ameexOrders.map((order) => order.id || (order as any)["Order ID"]).filter(Boolean));
+        successCount += result.updated;
+        const unmatched = new Set(result.unmatched_codes || []);
+        for (const order of ameexOrders) {
+          if (unmatched.has(String((order as any).tracking_number || ""))) {
+            failureCount++;
+            failedOrders.push(`#${order.order_number} (Ameex did not return this parcel in MassTracking)`);
+          }
+        }
+        for (const failure of result.failures || []) {
+          failureCount++;
+          failedOrders.push(`Ameex (${failure})`);
+        }
+      } catch (error: any) {
+        failureCount += ameexOrders.length;
+        ameexOrders.forEach((order) => failedOrders.push(`#${order.order_number} (${error?.message || "Ameex MassTracking failed"})`));
+      }
+    }
+
+    // Sendit has an individual delivery-details endpoint. Its backend wrapper
+    // limits this local polling to non-terminal Sendit orders and three
+    // concurrent requests, keeping the documented 1000/hour provider limit
+    // well below a browser refresh loop.
+    const senditOrders = orders.filter((order) => String((order as any).shipping_provider || "").toLowerCase() === "sendit");
+    if (senditOrders.length > 0) {
+      try {
+        const result = await syncSenditMassTracking(workspace?.id ?? "", senditOrders.map((order) => order.id || (order as any)["Order ID"]).filter(Boolean));
+        successCount += result.updated;
+        for (const failure of result.failures || []) {
+          failureCount++;
+          failedOrders.push(`Sendit (${failure})`);
+        }
+      } catch (error: any) {
+        failureCount += senditOrders.length;
+        senditOrders.forEach((order) => failedOrders.push(`#${order.order_number} (${error?.message || "Sendit tracking failed"})`));
+      }
+    }
+
+    // Process the other providers in parallel through their existing routes.
+    const refreshPromises = orders.filter((order) => !["ameex", "sendit"].includes(String((order as any).shipping_provider || "").toLowerCase())).map(async (order) => {
+      const orderCarrier = String((order as any).shipping_provider || "").toLowerCase();
+      if (!orderCarrier) return { success: false, orderNumber: order.order_number, error: "No saved shipping provider" };
       const isColiaty = orderCarrier === "coliaty";
+      const isForceLog = orderCarrier === "forcelog";
       const trackingField = isColiaty ? "coliaty_parcel_code" : "tracking_number";
       const trackingNumber = (order as any)[trackingField];
 
@@ -597,6 +675,12 @@ export default function Delivering() {
       }
 
       try {
+        if (isForceLog) {
+          const orderId = order.id || (order as any)["Order ID"];
+          if (!orderId) return { success: false, orderNumber: order.order_number, error: "Missing order ID" };
+          await syncForceLogTracking(order.workspace_id || (workspace?.id ?? ""), orderId);
+          return { success: true, orderNumber: order.order_number };
+        }
         if (isColiaty) {
           const syncRes = await syncColiatyTracking(order, order.workspace_id || (workspace?.id ?? ""));
           if (syncRes.success) {
@@ -612,8 +696,8 @@ export default function Delivering() {
             return { success: false, orderNumber: order.order_number, error: syncRes.error };
           }
         }
-      } catch (err) {
-        return { success: false, orderNumber: order.order_number, error: "Technical error" };
+      } catch (err: any) {
+        return { success: false, orderNumber: order.order_number, error: err?.message || "Technical error" };
       }
     });
 
@@ -636,65 +720,78 @@ export default function Delivering() {
     }
 
     return { successCount, failureCount, failedOrders };
-  }, [getEligibleOrdersForAutoRefresh, workspace?.id, workspace?.carrier, reload]);
+  }, [getEligibleOrdersForAutoRefresh, workspace?.id, reload]);
 
   // Auto refresh function - uses unified refreshShippingStatuses
+  const runShippingRefresh = useCallback(async (ordersToRefresh: Order[] = []) => {
+    if (isShippingRefreshRunningRef.current) {
+      console.log('[Refresh] A synchronization is already running; skipping this request');
+      return { skipped: true, successCount: 0, failureCount: 0, failedOrders: [] as string[] };
+    }
+
+    isShippingRefreshRunningRef.current = true;
+    try {
+      return { skipped: false, ...(await refreshShippingStatuses(ordersToRefresh)) };
+    } finally {
+      isShippingRefreshRunningRef.current = false;
+    }
+  }, [refreshShippingStatuses]);
+
   const performAutoRefresh = useCallback(async () => {
-    // Prevent overlapping refresh cycles
-    if (isAutoRefreshRunningRef.current) {
-      console.log('[AutoRefresh] Already running, skipping this cycle');
+    if (isShippingRefreshRunningRef.current) {
+      console.log('[AutoRefresh] A synchronization is already running, skipping this cycle');
       return;
     }
 
     console.log('[AutoRefresh] Starting full API synchronization');
-    isAutoRefreshRunningRef.current = true;
     setIsAutoRefreshing(true);
     setAutoRefreshError(null);
-
     try {
-      // Use the SAME unified refresh function as manual refresh
-      const { successCount, failureCount } = await refreshShippingStatuses();
-      
-      console.log(`[AutoRefresh] ✅ Completed: ${successCount} updated, ${failureCount} errors`);
+      const result = await runShippingRefresh();
+      if (!result.skipped) {
+        console.log(`[AutoRefresh] ✅ Completed: ${result.successCount} updated, ${result.failureCount} errors`);
+      }
     } catch (error) {
       console.error('[AutoRefresh] Fatal error:', error);
       setAutoRefreshError('Auto-refresh failed');
     } finally {
-      isAutoRefreshRunningRef.current = false;
       setIsAutoRefreshing(false);
     }
-  }, [refreshShippingStatuses]);
+  }, [runShippingRefresh]);
 
-  // Start/stop auto-refresh timer
+  // Keep a stable timer while always invoking the most recent callback. This
+  // avoids stale dependency closures and cleans up correctly under StrictMode.
   useEffect(() => {
-    // Start timer when component mounts
-    console.log('[AutoRefresh] Starting 20-second auto-refresh timer');
-    
-    autoRefreshTimerRef.current = setInterval(() => {
-      performAutoRefresh();
-    }, 20000); // 20 seconds
+    autoRefreshCallbackRef.current = () => { void performAutoRefresh(); };
+  }, [performAutoRefresh]);
 
-    // Cleanup on unmount
+  const startAutoRefreshTimer = useCallback(() => {
+    if (autoRefreshTimerRef.current) clearInterval(autoRefreshTimerRef.current);
+    const timer = setInterval(() => autoRefreshCallbackRef.current(), 20_000);
+    autoRefreshTimerRef.current = timer;
+    return timer;
+  }, []);
+
+  useEffect(() => {
+    if (!workspace?.id) return;
+    if (activeAutoRefreshWorkspaces.has(workspace.id)) return;
+    activeAutoRefreshWorkspaces.add(workspace.id);
+    console.log('[AutoRefresh] Starting one 20-second auto-refresh timer');
+    const timer = startAutoRefreshTimer();
     return () => {
-      console.log('[AutoRefresh] Stopping auto-refresh timer');
-      if (autoRefreshTimerRef.current) {
-        clearInterval(autoRefreshTimerRef.current);
+      if (autoRefreshTimerRef.current === timer) {
+        clearInterval(timer);
         autoRefreshTimerRef.current = null;
       }
+      activeAutoRefreshWorkspaces.delete(workspace.id);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Empty deps - timer starts once on mount
+  }, [workspace?.id, startAutoRefreshTimer]);
 
-  // Reset timer when manual refresh is triggered
   const resetAutoRefreshTimer = useCallback(() => {
-    if (autoRefreshTimerRef.current) {
-      clearInterval(autoRefreshTimerRef.current);
-      autoRefreshTimerRef.current = setInterval(() => {
-        performAutoRefresh();
-      }, 20000);
-      console.log('[AutoRefresh] Timer reset after manual refresh');
-    }
-  }, [performAutoRefresh]);
+    if (!workspace?.id) return;
+    startAutoRefreshTimer();
+    console.log('[AutoRefresh] Timer reset after manual refresh');
+  }, [workspace?.id, startAutoRefreshTimer]);
 
   // ── Derived order lists ──────────────────────────────────────────────────
   const filteredOrders = useMemo(() => {
@@ -919,10 +1016,16 @@ export default function Delivering() {
 
       await initializeOzonCities();
       let ozonSuccess = 0;
+      let ozonSkipped = 0;
       let ozonFailed = 0;
       const ozonErrors: string[] = [];
 
       for (const order of toExport) {
+        const existingTracking = String((order as any).tracking_number || (order as any).shipment_id || (order as any).coliaty_parcel_code || "").trim();
+        if (existingTracking) {
+          ozonSkipped++;
+          continue;
+        }
         const fullAddress = formatOzonAddress(order.address, order.city);
 
         if (!fullAddress || fullAddress.length < 5) {
@@ -1011,7 +1114,10 @@ export default function Delivering() {
         console.warn("[Delivering] Ozon registration failures:", ozonErrors);
         toast.error(`Ozon: ${ozonFailed} order${ozonFailed !== 1 ? "s" : ""} failed to register. Check console for details.`);
       }
-      return ozonSuccess > 0;
+      if (ozonSkipped > 0) {
+        toast.success(`Ozon: ${ozonSkipped} order${ozonSkipped === 1 ? " already has" : "s already have"} a shipment and ${ozonSkipped === 1 ? "was" : "were"} skipped.`);
+      }
+      return ozonSuccess + ozonSkipped > 0;
     } catch (err: any) {
       toast.error(`Ozon error: ${err?.message ?? String(err)}`);
       return false;
@@ -1046,20 +1152,15 @@ export default function Delivering() {
       }
 
       let coliatySuccess = 0;
+      let coliatySkipped = 0;
       let coliatyFailed = 0;
       const coliatyErrors: string[] = [];
 
       for (const order of toExport) {
-        // Check if order already has a Coliaty parcel code
-        if (order.coliaty_parcel_code) {
-          const shouldContinue = confirm(
-            `La commande #${order.order_number} a déjà été envoyée à Coliaty (code: ${order.coliaty_parcel_code}). Voulez-vous vraiment créer un nouveau colis ?`
-          );
-          if (!shouldContinue) {
-            coliatyErrors.push(`#${order.order_number}: annulé par l'utilisateur`);
-            coliatyFailed++;
-            continue;
-          }
+        const existingTracking = String((order as any).tracking_number || (order as any).shipment_id || order.coliaty_parcel_code || "").trim();
+        if (existingTracking) {
+          coliatySkipped++;
+          continue;
         }
 
         // Check if city is resolved for Coliaty
@@ -1130,7 +1231,10 @@ export default function Delivering() {
         console.warn("[Delivering] Coliaty registration failures:", coliatyErrors);
         toast.error(`Coliaty: ${coliatyFailed} order${coliatyFailed !== 1 ? "s" : ""} failed to register. Check console for details.`);
       }
-      return coliatySuccess > 0;
+      if (coliatySkipped > 0) {
+        toast.success(`Coliaty: ${coliatySkipped} order${coliatySkipped === 1 ? " already has" : "s already have"} a shipment and ${coliatySkipped === 1 ? "was" : "were"} skipped.`);
+      }
+      return coliatySuccess + coliatySkipped > 0;
     } catch (err: any) {
       toast.error(`Coliaty error: ${err?.message ?? String(err)}`);
       return false;
@@ -1140,6 +1244,230 @@ export default function Delivering() {
   };
 
   // ── Generate Delivery Note ──────────────────────────────────────────────────
+  const handleSendToForceLog = async (): Promise<boolean> => {
+    if (sendingToOzon || !workspace?.id) return false;
+    const toExport = getOrdersToExport();
+    if (!toExport.length) {
+      toast.error("No orders selected. Please check the boxes first.");
+      return false;
+    }
+
+    try {
+      const status = await getForceLogStatus(workspace.id);
+      if (!status.connected) {
+        toast.error("ForceLog is selected as your delivery company, but the integration is not connected. Connect it in Settings > Integrations.");
+        return false;
+      }
+    } catch (error: any) {
+      toast.error(error?.message || "Could not verify the ForceLog integration.");
+      return false;
+    }
+
+    setSendingToOzon(true);
+    try {
+      let successCount = 0;
+      let skippedCount = 0;
+      const failures: string[] = [];
+      for (const order of toExport) {
+        const orderId = order.id || (order as any)["Order ID"];
+        if (!orderId) {
+          failures.push(`#${order.order_number}: missing order ID`);
+          continue;
+        }
+        if ((order as any).shipping_provider === "forcelog" && (order as any).tracking_number) {
+          skippedCount++;
+          continue;
+        }
+        try {
+          const result = await createForceLogParcel(workspace.id, orderId);
+          (order as any).tracking_number = result.tracking_number;
+          (order as any).shipping_provider = "forcelog";
+          (order as any).shipping_status = result.order.shipping_status;
+          successCount++;
+        } catch (error: any) {
+          failures.push(`#${order.order_number}: ${error?.message || "ForceLog rejected the parcel"}`);
+        }
+      }
+      if (successCount) {
+        await reload();
+        toast.success(`ForceLog: ${successCount} parcel${successCount === 1 ? "" : "s"} created successfully.`);
+      }
+      if (skippedCount) toast.error(`ForceLog: ${skippedCount} already-sent order${skippedCount === 1 ? " was" : "s were"} skipped.`);
+      if (failures.length) {
+        console.warn("[Delivering] ForceLog parcel failures", failures);
+        toast.error(`ForceLog: ${failures.length} order${failures.length === 1 ? "" : "s"} failed. ${failures.slice(0, 2).join("; ")}`);
+      }
+      return successCount > 0;
+    } finally {
+      setSendingToOzon(false);
+    }
+  };
+
+  const handleSendToAmeex = async (): Promise<boolean> => {
+    if (sendingToOzon || !workspace?.id) return false;
+    const toExport = getOrdersToExport();
+    if (!toExport.length) {
+      toast.error("No orders selected. Please check the boxes first.");
+      return false;
+    }
+    try {
+      const status = await getAmeexStatus(workspace.id);
+      if (!status.connected) {
+        toast.error("Ameex is selected as your delivery company, but it is not connected. Connect it in Settings > Integrations.");
+        return false;
+      }
+    } catch (error: any) {
+      toast.error(error?.message || "Could not verify the Ameex integration.");
+      return false;
+    }
+
+    setSendingToOzon(true);
+    try {
+      setAmeexCitiesNeedingMapping([]);
+      let createdCount = 0;
+      let reconciledCount = 0;
+      let alreadyLinkedCount = 0;
+      const alreadyLinkedOrders: string[] = [];
+      const failures: string[] = [];
+      const queue = [...toExport];
+      const worker = async () => {
+        while (queue.length) {
+          const order = queue.shift();
+          if (!order) return;
+          const orderId = order.id || (order as any)["Order ID"];
+          if (!orderId) {
+            failures.push(`#${order.order_number}: missing order ID`);
+            continue;
+          }
+          const savedProvider = String((order as any).shipping_provider || (order as any).shipping_company || "").toLowerCase();
+          if (savedProvider && ((order as any).tracking_number || (order as any).shipment_id)) {
+            alreadyLinkedCount++;
+            alreadyLinkedOrders.push(`#${order.order_number}${savedProvider === "ameex" ? "" : ` (${savedProvider})`}`);
+            continue;
+          }
+          try {
+            const result = await createAmeexParcel(workspace.id, orderId);
+            const trackingNumber = result.trackingNumber || result.tracking_number;
+            // Always set Ameex attributes since we're calling the Ameex function
+            if (trackingNumber) {
+              (order as any).tracking_number = trackingNumber;
+              (order as any).shipment_id = trackingNumber;
+              (order as any).shipping_provider = "ameex";
+              if (result.shipping_status) (order as any).shipping_status = result.shipping_status;
+            }
+            if (result.status === "already_linked") {
+              alreadyLinkedCount++;
+              alreadyLinkedOrders.push(`#${order.order_number}${result.provider === "ameex" ? "" : ` (${result.provider})`}`);
+            } else if (result.status === "reconciled") {
+              reconciledCount++;
+            } else {
+              createdCount++;
+            }
+          } catch (error: any) {
+            if (error instanceof AmeexApiError && error.status === "already_linked") {
+              alreadyLinkedCount++;
+              alreadyLinkedOrders.push(`#${order.order_number}`);
+              continue;
+            }
+            const message = error?.message || "Ameex rejected the parcel";
+            const city = getUnmappedAmeexCity(message);
+            if (city) {
+              setAmeexCitiesNeedingMapping((previous) => previous.includes(city) ? previous : [...previous, city]);
+            }
+            failures.push(`#${order.order_number}: ${message}`);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
+      const completedCount = createdCount + reconciledCount + alreadyLinkedCount;
+      if (completedCount) {
+        await reload();
+        if (alreadyLinkedCount === 1 && createdCount === 0 && reconciledCount === 0) {
+          toast.success(`Ameex: ${alreadyLinkedOrders[0]} already has a shipment and was skipped.`);
+        } else {
+          const summary = [
+            createdCount ? `${createdCount} created` : null,
+            reconciledCount ? `${reconciledCount} reconciled` : null,
+            alreadyLinkedCount ? `${alreadyLinkedCount} already linked` : null,
+          ].filter(Boolean).join(", ");
+          toast.success(`Ameex: ${summary}.`);
+        }
+      }
+      if (failures.length) toast.error(`Ameex: ${failures.length} order${failures.length === 1 ? "" : "s"} failed. ${failures.slice(0, 2).join("; ")}`);
+      return completedCount > 0;
+    } finally {
+      setSendingToOzon(false);
+    }
+  };
+
+  const handleSendToSendit = async (): Promise<boolean> => {
+    if (sendingToOzon || !workspace?.id) return false;
+    const toExport = getOrdersToExport();
+    if (!toExport.length) {
+      toast.error("No orders selected. Please check the boxes first.");
+      return false;
+    }
+    try {
+      const status = await getSenditStatus(workspace.id);
+      if (!status.connected) {
+        toast.error("Sendit is selected as your delivery company, but it is not connected. Connect it in Settings > Integrations.");
+        return false;
+      }
+      if (!status.pickup_district_id) {
+        toast.error("Choose a Sendit default pickup city in Settings before sending orders.");
+        return false;
+      }
+    } catch (error: any) {
+      toast.error(error?.message || "Could not verify the Sendit integration.");
+      return false;
+    }
+
+    setSendingToOzon(true);
+    try {
+      let createdCount = 0;
+      let alreadyLinkedCount = 0;
+      const failures: string[] = [];
+      const queue = [...toExport];
+      const worker = async () => {
+        while (queue.length) {
+          const order = queue.shift();
+          if (!order) return;
+          const orderId = order.id || (order as any)["Order ID"];
+          if (!orderId) { failures.push(`#${order.order_number}: missing order ID`); continue; }
+          if ((order as any).tracking_number || (order as any).shipment_id) {
+            alreadyLinkedCount++;
+            continue;
+          }
+          try {
+            const result = await createSenditDelivery(workspace.id, orderId);
+            if (result.status === "already_linked") {
+              alreadyLinkedCount++;
+              continue;
+            }
+            const tracking = result.trackingNumber || result.tracking_number;
+            if (tracking) {
+              (order as any).tracking_number = tracking;
+              (order as any).shipment_id = tracking;
+              (order as any).shipping_provider = "sendit";
+              (order as any).shipping_status = result.shipping_status;
+            }
+            createdCount++;
+          } catch (error: any) {
+            failures.push(`#${order.order_number}: ${error?.message || "Sendit rejected the delivery"}`);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
+      if (createdCount || alreadyLinkedCount) await reload();
+      const summary = [createdCount ? `${createdCount} created` : null, alreadyLinkedCount ? `${alreadyLinkedCount} already linked` : null].filter(Boolean).join(", ");
+      if (summary) toast.success(`Sendit: ${summary}.`);
+      if (failures.length) toast.error(`Sendit: ${failures.length} order${failures.length === 1 ? "" : "s"} failed. ${failures.slice(0, 2).join("; ")}`);
+      return createdCount > 0 || alreadyLinkedCount > 0;
+    } finally {
+      setSendingToOzon(false);
+    }
+  };
+
   const handleGenerateDeliveryNote = async () => {
     if (generatingNote) return;
 
@@ -1150,6 +1478,24 @@ export default function Delivering() {
 
     if (selectedOrders.length === 0) {
       toast.error("Veuillez sélectionner au moins une commande.");
+      return;
+    }
+
+    // ForceLog has a per-parcel PDF label API, not an Ozon-style delivery-note
+    // API. Sending ForceLog codes to Ozon creates the misleading “parcel not
+    // found” error even though the parcel exists in ForceLog.
+    if (workspace?.carrier === "forcelog") {
+      await handleOpenForceLogLabels();
+      return;
+    }
+
+    if (workspace?.carrier === "ameex") {
+      await handleOpenAmeexLabels();
+      return;
+    }
+
+    if (workspace?.carrier === "sendit") {
+      await handleOpenSenditLabels();
       return;
     }
 
@@ -1345,23 +1691,48 @@ export default function Delivering() {
 
   // ── Refresh Status (Ozon Tracking) ──────────────────────────────────────────
   const handleRefreshStatus = async (order: Order) => {
-    if (refreshingOrderId) return;
+    if (refreshingOrderId || isShippingRefreshRunningRef.current) {
+      toast.error("A shipment status refresh is already running. Please wait for it to finish.");
+      return;
+    }
+    isShippingRefreshRunningRef.current = true;
     setRefreshingOrderId(order.id);
     try {
       // Determine carrier for this specific order
-      const orderCarrier = (order as any).shipping_provider || workspace?.carrier || "ozon";
+      const orderCarrier = String((order as any).shipping_provider || "").toLowerCase();
       const isColiaty = orderCarrier === "coliaty";
+      const isForceLog = orderCarrier === "forcelog";
+      const isAmeex = orderCarrier === "ameex";
+      const isSendit = orderCarrier === "sendit";
       const trackingField = isColiaty ? "coliaty_parcel_code" : "tracking_number";
       const trackingNumber = (order as any)[trackingField];
 
       // Check if tracking number exists before making API call
-      if (!trackingNumber) {
+      if (!orderCarrier || !trackingNumber) {
         toast.error(`Commande non envoyée au transporteur. Veuillez d'abord envoyer cette commande.`);
         setRefreshingOrderId(null);
         return;
       }
 
-      if (isColiaty) {
+      if (isSendit) {
+        const orderId = order.id || (order as any)["Order ID"];
+        if (!orderId) throw new Error("Order ID is missing.");
+        const result = await syncSenditTracking(order.workspace_id || (workspace?.id ?? ""), orderId);
+        toast.success(`Statut: ${result.shipping_status || result.raw_status || "updated"}`);
+        await reload();
+      } else if (isAmeex) {
+        const orderId = order.id || (order as any)["Order ID"];
+        if (!orderId) throw new Error("Order ID is missing.");
+        const result = await syncAmeexTracking(order.workspace_id || (workspace?.id ?? ""), orderId);
+        toast.success(`Statut: ${result.shipping_status || result.raw_status || "updated"}`);
+        await reload();
+      } else if (isForceLog) {
+        const orderId = order.id || (order as any)["Order ID"];
+        if (!orderId) throw new Error("Order ID is missing.");
+        const result = await syncForceLogTracking(order.workspace_id || (workspace?.id ?? ""), orderId);
+        toast.success(`Statut: ${result.shipping_status}`);
+        await reload();
+      } else if (isColiaty) {
         // Sync with Coliaty
         const syncRes = await syncColiatyTracking(order, order.workspace_id || (workspace?.id ?? ""));
         if (syncRes.success) {
@@ -1397,6 +1768,7 @@ export default function Delivering() {
     } catch (err: any) {
       toast.error(`Error: ${err?.message || String(err)}`);
     } finally {
+      isShippingRefreshRunningRef.current = false;
       setRefreshingOrderId(null);
     }
   };
@@ -1418,10 +1790,10 @@ export default function Delivering() {
     const ordersWithTracking: Order[] = [];
 
     for (const order of selectedOrders) {
-      const orderCarrier = (order as any).shipping_provider || workspace?.carrier || "ozon";
+      const orderCarrier = String((order as any).shipping_provider || "").toLowerCase();
       const trackingField = orderCarrier === "coliaty" ? "coliaty_parcel_code" : "tracking_number";
 
-      if (!(order as any)[trackingField]) {
+      if (!orderCarrier || !(order as any)[trackingField]) {
         ordersWithoutTracking.push(order);
       } else {
         ordersWithTracking.push(order);
@@ -1444,7 +1816,12 @@ export default function Delivering() {
 
     try {
       // Use unified refresh function
-      const { successCount, failureCount, failedOrders } = await refreshShippingStatuses(ordersWithTracking);
+      const refreshResult = await runShippingRefresh(ordersWithTracking);
+      if (refreshResult.skipped) {
+        toast.error("A shipment status refresh is already running. Please wait for it to finish.");
+        return;
+      }
+      const { successCount, failureCount, failedOrders } = refreshResult;
 
       // Show summary toast
       if (successCount > 0 && failureCount === 0) {
@@ -1463,6 +1840,218 @@ export default function Delivering() {
   };
 
   // ── View All Selected PDFs ─────────────────────────────────────────────────
+  const handleOpenSenditLabels = async () => {
+    if (isOpeningSenditLabels || !workspace?.id) return;
+    const eligible = orders.filter((order) => selectedOrderIds.includes(order.id || order.order_number))
+      .filter((order) => String((order as any).shipping_provider || "").toLowerCase() === "sendit" && ((order as any).tracking_number || (order as any).shipment_id));
+    if (!eligible.length) {
+      toast.error("Select at least one sent Sendit parcel before printing labels.");
+      return;
+    }
+    setIsOpeningSenditLabels(true);
+    try {
+      const result = await getSenditLabels(workspace.id, eligible.map((order) => order.id || (order as any)["Order ID"]).filter(Boolean));
+      const fileUrl = result.data?.fileUrl;
+      if (!result.data?.filePrint || !fileUrl) throw new Error("Sendit did not return a printable label file.");
+      window.open(fileUrl, "_blank", "noopener,noreferrer");
+      toast.success(`Sendit labels ready for ${eligible.length} parcel${eligible.length === 1 ? "" : "s"}.`);
+    } catch (error: any) {
+      toast.error(error?.message || "Could not print Sendit labels.");
+    } finally {
+      setIsOpeningSenditLabels(false);
+    }
+  };
+
+  const handleOpenAmeexLabels = async () => {
+    if (isOpeningAmeexLabels || !workspace?.id) return;
+    const selectedOrders = orders.filter((order) => selectedOrderIds.includes(order.id || order.order_number));
+    const eligible = selectedOrders.filter((order) =>
+      (order as any).shipping_provider === "ameex" && ((order as any).tracking_number || (order as any).shipment_id),
+    );
+    if (!eligible.length) {
+      toast.error("Select at least one sent Ameex parcel before printing labels.");
+      return;
+    }
+    const printWindow = window.open("", "_blank");
+    setIsOpeningAmeexLabels(true);
+    try {
+      const orderIds = eligible.map((order) => order.id || (order as any)["Order ID"]).filter(Boolean);
+      const html = await printAmeexLabels(workspace.id, orderIds, "Label_A4");
+      if (printWindow) {
+        printWindow.document.open();
+        printWindow.document.write(html);
+        printWindow.document.close();
+      } else {
+        const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+        window.open(url, "_blank");
+      }
+      await reload();
+      toast.success(`Ameex labels ready for ${eligible.length} parcel${eligible.length === 1 ? "" : "s"}.`);
+    } catch (error: any) {
+      printWindow?.close();
+      toast.error(error?.message || "Could not print Ameex labels.");
+    } finally {
+      setIsOpeningAmeexLabels(false);
+    }
+  };
+
+  const openAmeexEditor = (order: Order, mode: "edit" | "relaunch-new") => {
+    setAmeexForm({
+      receiver: String((order as any).customer_name || order.customer?.name || ""),
+      phone: String(order.phone || order.customer?.phone || ""),
+      city: String(order.city || ""),
+      address: String(order.address || ""),
+      comment: String((order as any).notes || ""),
+      product: String((order as any).product_name || order.product_variant || order.sku || "Order"),
+      cod: String((order as any).cod_amount ?? order.total ?? ""),
+      price: String((order as any).cod_amount ?? order.total ?? ""),
+      order_num: String(order.order_number || ""),
+    });
+    setAmeexEditor({ order, mode });
+  };
+
+  const submitAmeexEditor = async () => {
+    if (!workspace?.id || !ameexEditor) return;
+    setAmeexActionBusy(true);
+    try {
+      const orderId = ameexEditor.order.id || (ameexEditor.order as any)["Order ID"];
+      if (!orderId) throw new Error("Order ID is missing.");
+      if (ameexEditor.mode === "edit") await editAmeexParcel(workspace.id, orderId, ameexForm);
+      else await relaunchAmeexParcelForNewCustomer(workspace.id, orderId, ameexForm);
+      toast.success(ameexEditor.mode === "edit" ? "Ameex parcel updated." : "Ameex new-customer relaunch requested.");
+      setAmeexEditor(null);
+      await reload();
+    } catch (error: any) {
+      toast.error(error?.message || "Ameex parcel action failed.");
+    } finally {
+      setAmeexActionBusy(false);
+    }
+  };
+
+  const handleAmeexRelaunch = async (order: Order) => {
+    if (!workspace?.id || !confirm(`Relaunch Ameex parcel for order #${order.order_number}?`)) return;
+    setAmeexActionBusy(true);
+    try {
+      const orderId = order.id || (order as any)["Order ID"];
+      if (!orderId) throw new Error("Order ID is missing.");
+      await relaunchAmeexParcel(workspace.id, orderId);
+      toast.success("Ameex relaunch requested. Tracking will refresh normally.");
+      await reload();
+    } catch (error: any) { toast.error(error?.message || "Could not relaunch the Ameex parcel."); }
+    finally { setAmeexActionBusy(false); }
+  };
+
+  const handleAmeexDelete = async (order: Order) => {
+    if (!workspace?.id || !confirm(`Delete the Ameex parcel for order #${order.order_number}? The Ecom order itself will be kept.`)) return;
+    setAmeexActionBusy(true);
+    try {
+      const orderId = order.id || (order as any)["Order ID"];
+      if (!orderId) throw new Error("Order ID is missing.");
+      await deleteAmeexParcel(workspace.id, orderId);
+      toast.success("Ameex parcel deleted. The order and its history were kept.");
+      setPanelOrder(null);
+      await reload();
+    } catch (error: any) { toast.error(error?.message || "Could not delete the Ameex parcel."); }
+    finally { setAmeexActionBusy(false); }
+  };
+
+  const handleAmeexReconcile = async (order: Order) => {
+    if (!workspace?.id) return;
+    setAmeexActionBusy(true);
+    try {
+      const orderId = order.id || (order as any)["Order ID"];
+      if (!orderId) throw new Error("Order ID is missing.");
+      const result = await reconcileAmeexParcel(workspace.id, orderId);
+      toast.success(`Ameex parcel ${result.tracking_number} linked to #${order.order_number}.`);
+      await reload();
+    } catch (error: any) {
+      toast.error(error?.message || "Could not reconcile an existing Ameex parcel.");
+    } finally {
+      setAmeexActionBusy(false);
+    }
+  };
+
+  const submitAmeexPickup = async () => {
+    if (!workspace?.id) return;
+    setAmeexActionBusy(true);
+    try {
+      await requestAmeexPickup(workspace.id, ameexPickup);
+      toast.success("Ameex pickup request submitted.");
+      setAmeexPickupOpen(false);
+      setAmeexPickup({ city: "", address: "", phone: "", note: "" });
+    } catch (error: any) { toast.error(error?.message || "Could not submit the Ameex pickup request."); }
+    finally { setAmeexActionBusy(false); }
+  };
+
+  const submitSenditPickup = async () => {
+    if (!workspace?.id) return;
+    const eligible = orders.filter((order) => selectedOrderIds.includes(order.id || order.order_number))
+      .filter((order) => String((order as any).shipping_provider || "").toLowerCase() === "sendit" && ((order as any).tracking_number || (order as any).shipment_id));
+    if (!eligible.length) {
+      toast.error("Select at least one sent Sendit parcel before requesting a pickup.");
+      return;
+    }
+    setSenditActionBusy(true);
+    try {
+      const status = await getSenditStatus(workspace.id);
+      if (!status.pickup_district_id) throw new Error("Choose a Sendit default pickup city in Settings first.");
+      await createSenditPickup(workspace.id, {
+        district_id: status.pickup_district_id,
+        name: senditPickup.name,
+        phone: senditPickup.phone,
+        address: senditPickup.address,
+        note: senditPickup.note,
+        deliveries: eligible.map((order) => (order as any).tracking_number || (order as any).shipment_id).join(","),
+        movements: "",
+      });
+      toast.success("Sendit pickup request submitted.");
+      setSenditPickupOpen(false);
+      setSenditPickup({ name: "", address: "", phone: "", note: "" });
+    } catch (error: any) { toast.error(error?.message || "Could not submit the Sendit pickup request."); }
+    finally { setSenditActionBusy(false); }
+  };
+
+  const handleOpenForceLogLabels = async () => {
+    if (isOpeningForceLogLabels || !workspace?.id) return;
+    const selectedOrders = orders.filter((order) => selectedOrderIds.includes(order.id || order.order_number));
+    const eligible = selectedOrders.filter((order) =>
+      (order as any).shipping_provider === "forcelog" &&
+      ((order as any).tracking_number || (order as any).shipment_id),
+    );
+    if (!eligible.length) {
+      toast.error("Select at least one ForceLog parcel with a tracking number.");
+      return;
+    }
+
+    const tabs = eligible.map(() => window.open("", "_blank"));
+    setIsOpeningForceLogLabels(true);
+    const failures: string[] = [];
+    try {
+      for (let index = 0; index < eligible.length; index++) {
+        const order = eligible[index];
+        const orderId = order.id || (order as any)["Order ID"];
+        if (!orderId) {
+          failures.push(`#${order.order_number}: missing order ID`);
+          tabs[index]?.close();
+          continue;
+        }
+        try {
+          const pdf = await getForceLogPdf(workspace.id, orderId);
+          const url = URL.createObjectURL(pdf);
+          if (tabs[index]) tabs[index]!.location.href = url;
+          else window.open(url, "_blank");
+        } catch (error: any) {
+          failures.push(`#${order.order_number}: ${error?.message || "label unavailable"}`);
+          tabs[index]?.close();
+        }
+      }
+      if (!failures.length) toast.success(`Opened ${eligible.length} ForceLog label${eligible.length === 1 ? "" : "s"}.`);
+      else toast.error(`Some ForceLog labels could not be opened: ${failures.slice(0, 2).join("; ")}`);
+    } finally {
+      setIsOpeningForceLogLabels(false);
+    }
+  };
+
   const handleViewAllSelectedPdfs = async () => {
     if (isOpeningAllPdfs || visibleSelectedCount === 0) return;
 
@@ -1473,6 +2062,16 @@ export default function Delivering() {
 
     if (selectedOrders.length === 0) {
       toast.error("Veuillez sélectionner au moins une commande.");
+      return;
+    }
+
+    if (workspace?.carrier === "forcelog") {
+      await handleOpenForceLogLabels();
+      return;
+    }
+
+    if (workspace?.carrier === "ameex") {
+      await handleOpenAmeexLabels();
       return;
     }
 
@@ -1547,21 +2146,47 @@ export default function Delivering() {
 
             {workspace?.carrier === "coliaty" ? (
               <OzonSendButton onSend={handleSendToColiaty} disabled={sendingToOzon} idleLabel="Send to Coliaty" sendingLabel="Sending..." successLabel="Sent!" errorLabel="Failed" />
+            ) : workspace?.carrier === "forcelog" ? (
+              <OzonSendButton onSend={handleSendToForceLog} disabled={sendingToOzon} idleLabel="Send to ForceLog" sendingLabel="Sending..." successLabel="Sent!" errorLabel="Failed" />
+            ) : workspace?.carrier === "ameex" ? (
+              <OzonSendButton onSend={handleSendToAmeex} disabled={sendingToOzon} idleLabel="Send to Ameex" sendingLabel="Sending..." successLabel="Sent!" errorLabel="Failed" />
+            ) : workspace?.carrier === "sendit" ? (
+              <OzonSendButton onSend={handleSendToSendit} disabled={sendingToOzon} idleLabel="Send to Sendit" sendingLabel="Sending..." successLabel="Sent!" errorLabel="Failed" />
             ) : (
               <OzonSendButton onSend={handleSendToOzon} disabled={sendingToOzon} idleLabel="Send to Ozon" sendingLabel="Sending..." successLabel="Sent!" errorLabel="Failed" />
             )}
 
             <button
               type="button"
-              onClick={handleGenerateDeliveryNote}
-              disabled={generatingNote || selectedOrderIds.length === 0 || selectedOrdersHasExistingBL}
+              onClick={workspace?.carrier === "forcelog" ? handleOpenForceLogLabels : workspace?.carrier === "ameex" ? handleOpenAmeexLabels : workspace?.carrier === "sendit" ? handleOpenSenditLabels : handleGenerateDeliveryNote}
+              disabled={workspace?.carrier === "forcelog" ? isOpeningForceLogLabels || selectedOrderIds.length === 0 : workspace?.carrier === "ameex" ? isOpeningAmeexLabels || selectedOrderIds.length === 0 : workspace?.carrier === "sendit" ? isOpeningSenditLabels || selectedOrderIds.length === 0 : generatingNote || selectedOrderIds.length === 0 || selectedOrdersHasExistingBL}
               className="group flex h-[36px] items-center justify-center gap-2 rounded-lg bg-white border border-gray-200 px-3.5 text-[13px] font-semibold text-gray-700 shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-indigo-500/30 hover:border-indigo-200 hover:bg-indigo-50/50 hover:text-indigo-700 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <div className="relative flex items-center justify-center">
-                {generatingNote ? <RefreshCw size={15} className="animate-spin text-indigo-600" /> : <FileText size={15} className="text-gray-400 group-hover:text-indigo-500 transition-colors" />}
+                {generatingNote || isOpeningForceLogLabels || isOpeningAmeexLabels || isOpeningSenditLabels ? <RefreshCw size={15} className="animate-spin text-indigo-600" /> : workspace?.carrier === "forcelog" || workspace?.carrier === "ameex" || workspace?.carrier === "sendit" ? <Printer size={15} className="text-gray-400 group-hover:text-indigo-500 transition-colors" /> : <FileText size={15} className="text-gray-400 group-hover:text-indigo-500 transition-colors" />}
               </div>
-              <span className="hidden sm:inline">{workspace?.carrier === "coliaty" ? "Bon de Ramassage" : "Bon de Livraison"}</span>
+              <span className="hidden sm:inline">{workspace?.carrier === "forcelog" ? "ForceLog Labels" : workspace?.carrier === "ameex" ? "Ameex Labels" : workspace?.carrier === "sendit" ? "Sendit Labels" : workspace?.carrier === "coliaty" ? "Bon de Ramassage" : "Bon de Livraison"}</span>
             </button>
+
+            {workspace?.carrier === "ameex" && <button
+              type="button"
+              onClick={() => setAmeexPickupOpen(true)}
+              disabled={ameexActionBusy}
+              className="group flex h-[36px] items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 text-[13px] font-semibold text-gray-700 shadow-sm transition-all hover:border-indigo-200 hover:bg-indigo-50/50 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Truck size={15} className="text-gray-400 group-hover:text-indigo-500" />
+              <span className="hidden xl:inline">Request pickup</span>
+            </button>}
+
+            {workspace?.carrier === "sendit" && <button
+              type="button"
+              onClick={() => setSenditPickupOpen(true)}
+              disabled={senditActionBusy}
+              className="group flex h-[36px] items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 text-[13px] font-semibold text-gray-700 shadow-sm transition-all hover:border-indigo-200 hover:bg-indigo-50/50 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Truck size={15} className="text-gray-400 group-hover:text-indigo-500" />
+              <span className="hidden xl:inline">Request pickup</span>
+            </button>}
 
             <button
               type="button"
@@ -1573,7 +2198,7 @@ export default function Delivering() {
               <span className="hidden xl:inline">Actualiser</span>
             </button>
 
-            <button
+            {workspace?.carrier !== "forcelog" && workspace?.carrier !== "ameex" && workspace?.carrier !== "sendit" && <button
               type="button"
               onClick={handleViewAllSelectedPdfs}
               disabled={isOpeningAllPdfs || visibleSelectedCount === 0}
@@ -1581,11 +2206,24 @@ export default function Delivering() {
             >
               {isOpeningAllPdfs ? <RefreshCw size={15} className="animate-spin text-indigo-100" /> : <Eye size={15} className="text-indigo-100" />}
               <span className="hidden xl:inline tracking-wide drop-shadow-sm">Voir PDF</span>
-            </button>
+            </button>}
           </div>
         </div>
 
         {/* ── Filter Row (Compact) ── */}
+        {workspace?.carrier === "ameex" && ameexCitiesNeedingMapping.length > 0 && (
+          <div role="alert" className="mb-4 flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-600" />
+              <div>
+                <p className="text-[13px] font-semibold">Ameex city mapping required</p>
+                <p className="mt-0.5 text-[12px] text-amber-800">{ameexCitiesNeedingMapping.join(", ")} must have a verified Ameex City ID before any parcel can be created.</p>
+              </div>
+            </div>
+            <button type="button" onClick={() => navigate(`/settings?tab=integrations&carrier=ameex&city=${encodeURIComponent(ameexCitiesNeedingMapping[0])}`)} className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-[12px] font-semibold text-white shadow-sm transition-colors hover:bg-amber-700">Map city</button>
+          </div>
+        )}
+
         <div className="flex items-center gap-1.5 overflow-x-auto hide-scrollbar" style={{ scrollbarWidth: "none" }}>
           {dynamicFilters.map((filter) => {
             const isActive = activeTab === filter.id;
@@ -1877,7 +2515,7 @@ export default function Delivering() {
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-[12px] text-gray-500">Provider</span>
-                  <span className="text-[13px] font-medium text-gray-900 capitalize">{(panelOrder as any).shipping_provider || workspace?.carrier || "Ozon"}</span>
+                  <span className="text-[13px] font-medium text-gray-900 capitalize">{((panelOrder as any).shipping_provider || workspace?.carrier) === "forcelog" ? "ForceLog" : ((panelOrder as any).shipping_provider || workspace?.carrier) === "ameex" ? "Ameex" : ((panelOrder as any).shipping_provider || workspace?.carrier || "Ozon")}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[12px] text-gray-500">Tracking</span>
@@ -1895,13 +2533,13 @@ export default function Delivering() {
                         >
                           <Copy size={12} />
                         </button>
-                        <button
+                        {((panelOrder as any).shipping_provider || workspace?.carrier) === "ozon" && <button
                           onClick={() => window.open(`https://client.ozoneexpress.ma/tracking/${panelOrder.tracking_number}`, '_blank')}
                           className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors"
                           title="View tracking"
                         >
                           <ExternalLink size={12} />
-                        </button>
+                        </button>}
                       </div>
                     )}
                   </div>
@@ -1926,6 +2564,26 @@ export default function Delivering() {
                 </div>
               </div>
             </div>
+
+            {((panelOrder as any).shipping_provider || workspace?.carrier) === "ameex" && panelOrder.tracking_number && (
+              <div className="border-b border-gray-100 px-4 py-3">
+                <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Ameex parcel actions</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => openAmeexEditor(panelOrder, "edit")} disabled={ameexActionBusy} className="flex items-center justify-center gap-1.5 rounded-lg bg-indigo-50 px-2.5 py-2 text-[11.5px] font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"><Pencil size={13} />Edit</button>
+                  <button onClick={() => void handleAmeexRelaunch(panelOrder)} disabled={ameexActionBusy} className="flex items-center justify-center gap-1.5 rounded-lg bg-amber-50 px-2.5 py-2 text-[11.5px] font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-50"><RotateCcw size={13} />Relaunch</button>
+                  <button onClick={() => openAmeexEditor(panelOrder, "relaunch-new")} disabled={ameexActionBusy} className="flex items-center justify-center gap-1.5 rounded-lg bg-sky-50 px-2.5 py-2 text-[11.5px] font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50"><Truck size={13} />New customer</button>
+                  <button onClick={() => void handleAmeexDelete(panelOrder)} disabled={ameexActionBusy} className="flex items-center justify-center gap-1.5 rounded-lg bg-red-50 px-2.5 py-2 text-[11.5px] font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"><Trash2 size={13} />Delete parcel</button>
+                </div>
+              </div>
+            )}
+
+            {((panelOrder as any).shipping_provider || workspace?.carrier) === "ameex" && !panelOrder.tracking_number && !(panelOrder as any).shipment_id && (
+              <div className="border-b border-gray-100 px-4 py-3">
+                <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Ameex shipment recovery</div>
+                <p className="mb-3 text-[12px] leading-relaxed text-gray-500">Safely checks Ameex for an existing parcel with this exact order number. It never creates a new parcel.</p>
+                <button onClick={() => void handleAmeexReconcile(panelOrder)} disabled={ameexActionBusy} className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-50 px-2.5 py-2 text-[11.5px] font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"><RefreshCw size={13} className={ameexActionBusy ? "animate-spin" : ""} />Reconcile existing Ameex parcel</button>
+              </div>
+            )}
 
             {/* Delivery Progress */}
             <div className="px-4 py-3 border-b border-gray-100">
@@ -2044,6 +2702,47 @@ export default function Delivering() {
               </div>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {ameexEditor && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-gray-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-gray-100 px-6 py-5">
+              <div><h3 className="text-[17px] font-bold text-gray-900">{ameexEditor.mode === "edit" ? "Edit Ameex parcel" : "Relaunch for a new customer"}</h3><p className="mt-1 text-[12px] text-gray-500">#{ameexEditor.order.order_number} · Ameex validates the final eligibility and city mapping.</p></div>
+              <button onClick={() => !ameexActionBusy && setAmeexEditor(null)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700"><X size={17} /></button>
+            </div>
+            <div className="grid gap-4 p-6 sm:grid-cols-2">
+              {([
+                ["receiver", "Customer name"], ["phone", "Phone"], ["city", "Ecom city"], ["address", "Address"], ["order_num", "Order number"], [ameexEditor.mode === "edit" ? "cod" : "price", ameexEditor.mode === "edit" ? "COD" : "Price"], ["product", "Product"], ["comment", "Comment"],
+              ] as const).map(([field, label]) => <label key={field} className={`block text-[12px] font-semibold text-gray-700 ${field === "address" || field === "comment" ? "sm:col-span-2" : ""}`}><span className="mb-1.5 block">{label}</span>{field === "address" || field === "comment" ? <textarea value={ameexForm[field] || ""} onChange={(event) => setAmeexForm((previous) => ({ ...previous, [field]: event.target.value }))} rows={field === "address" ? 2 : 3} className="w-full resize-y rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-[13px] font-normal text-gray-900 outline-none focus:border-indigo-400 focus:bg-white" /> : <input value={ameexForm[field] || ""} onChange={(event) => setAmeexForm((previous) => ({ ...previous, [field]: event.target.value }))} inputMode={field === "cod" || field === "price" ? "decimal" : undefined} className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-[13px] font-normal text-gray-900 outline-none focus:border-indigo-400 focus:bg-white" />}</label>)}
+            </div>
+            <div className="flex justify-end gap-3 border-t border-gray-100 bg-gray-50 px-6 py-4"><button onClick={() => setAmeexEditor(null)} disabled={ameexActionBusy} className="rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-[13px] font-semibold text-gray-700 hover:bg-gray-100">Cancel</button><button onClick={() => void submitAmeexEditor()} disabled={ameexActionBusy} className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">{ameexActionBusy && <RefreshCw size={14} className="animate-spin" />}{ameexEditor.mode === "edit" ? "Save Ameex update" : "Relaunch new customer"}</button></div>
+          </div>
+        </div>
+      )}
+
+      {ameexPickupOpen && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-gray-100 px-6 py-5"><div><h3 className="text-[17px] font-bold text-gray-900">Request Ameex pickup</h3><p className="mt-1 text-[12px] text-gray-500">The city must already have a verified Ameex City ID mapping.</p></div><button onClick={() => !ameexActionBusy && setAmeexPickupOpen(false)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700"><X size={17} /></button></div>
+            <div className="space-y-4 p-6">{([
+              ["city", "Pickup city"], ["address", "Pickup address"], ["phone", "Pickup phone"], ["note", "Note (optional)"],
+            ] as const).map(([field, label]) => <label key={field} className="block text-[12px] font-semibold text-gray-700"><span className="mb-1.5 block">{label}</span>{field === "address" || field === "note" ? <textarea value={ameexPickup[field]} onChange={(event) => setAmeexPickup((previous) => ({ ...previous, [field]: event.target.value }))} rows={field === "address" ? 2 : 3} className="w-full resize-y rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-[13px] font-normal text-gray-900 outline-none focus:border-indigo-400 focus:bg-white" /> : <input value={ameexPickup[field]} onChange={(event) => setAmeexPickup((previous) => ({ ...previous, [field]: event.target.value }))} className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-[13px] font-normal text-gray-900 outline-none focus:border-indigo-400 focus:bg-white" />}</label>)}</div>
+            <div className="flex justify-end gap-3 border-t border-gray-100 bg-gray-50 px-6 py-4"><button onClick={() => setAmeexPickupOpen(false)} disabled={ameexActionBusy} className="rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-[13px] font-semibold text-gray-700 hover:bg-gray-100">Cancel</button><button onClick={() => void submitAmeexPickup()} disabled={ameexActionBusy || !ameexPickup.city.trim() || !ameexPickup.address.trim() || !ameexPickup.phone.trim()} className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">{ameexActionBusy && <RefreshCw size={14} className="animate-spin" />}Request pickup</button></div>
+          </div>
+        </div>
+      )}
+
+      {senditPickupOpen && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-gray-100 px-6 py-5"><div><h3 className="text-[17px] font-bold text-gray-900">Request Sendit pickup</h3><p className="mt-1 text-[12px] text-gray-500">Uses the default Sendit pickup city configured in Settings and the selected Sendit parcels.</p></div><button onClick={() => !senditActionBusy && setSenditPickupOpen(false)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700"><X size={17} /></button></div>
+            <div className="space-y-4 p-6">{([
+              ["name", "Contact name"], ["address", "Pickup address"], ["phone", "Pickup phone"], ["note", "Note (optional)"],
+            ] as const).map(([field, label]) => <label key={field} className="block text-[12px] font-semibold text-gray-700"><span className="mb-1.5 block">{label}</span>{field === "address" || field === "note" ? <textarea value={senditPickup[field]} onChange={(event) => setSenditPickup((previous) => ({ ...previous, [field]: event.target.value }))} rows={field === "address" ? 2 : 3} className="w-full resize-y rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-[13px] font-normal text-gray-900 outline-none focus:border-indigo-400 focus:bg-white" /> : <input value={senditPickup[field]} onChange={(event) => setSenditPickup((previous) => ({ ...previous, [field]: event.target.value }))} className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-[13px] font-normal text-gray-900 outline-none focus:border-indigo-400 focus:bg-white" />}</label>)}</div>
+            <div className="flex justify-end gap-3 border-t border-gray-100 bg-gray-50 px-6 py-4"><button onClick={() => setSenditPickupOpen(false)} disabled={senditActionBusy} className="rounded-lg border border-gray-200 bg-white px-4 py-2.5 text-[13px] font-semibold text-gray-700 hover:bg-gray-100">Cancel</button><button onClick={() => void submitSenditPickup()} disabled={senditActionBusy || !senditPickup.name.trim() || !senditPickup.address.trim() || !senditPickup.phone.trim()} className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">{senditActionBusy && <RefreshCw size={14} className="animate-spin" />}Request pickup</button></div>
           </div>
         </div>
       )}

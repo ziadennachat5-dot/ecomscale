@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Truck, ExternalLink, KeyRound, User, Building2, X, CheckCircle2, Loader2, Save, MoreHorizontal } from "lucide-react";
-import IconOzon from "../../../assets/integrationicon/imgi_27_ozonexpress.jpg";
+import { getIntegrationLogo } from "../../../lib/integrationLogos";
 
 function OzonShippingIntegrationCard() {
   const [isOzonModalOpen, setIsOzonModalOpen] = useState(false);
@@ -70,7 +70,7 @@ function OzonShippingIntegrationCard() {
 
         <div className="flex flex-col pb-4">
           <div className="mb-4 flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-base-raised overflow-hidden border border-base-border/50">
-            <img src={IconOzon} alt="Ozon Express" className="h-full w-full object-cover" />
+            <img src={getIntegrationLogo("ozon") || ""} alt="Ozon Express" className="h-full w-full object-contain" />
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -132,7 +132,7 @@ function OzonShippingIntegrationCard() {
             {/* Header */}
             <div className="flex items-center gap-4 px-7 py-6 border-b border-base-border/60 bg-base-raised/30">
               <div className="h-11 w-11 rounded-2xl overflow-hidden border border-base-border/50 flex-shrink-0">
-                <img src={IconOzon} alt="Ozon" className="h-full w-full object-cover" />
+                <img src={getIntegrationLogo("ozon") || ""} alt="Ozon" className="h-full w-full object-contain" />
               </div>
               <div className="flex-1">
                 <h2 className="text-[18px] font-bold text-ink">Ozon Shipping</h2>

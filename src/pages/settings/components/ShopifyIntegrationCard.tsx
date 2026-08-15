@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { ShoppingBag, ExternalLink, CheckCircle2, Loader2, X, Globe, MoreHorizontal, Store } from "lucide-react";
+import { getIntegrationLogo } from "../../../lib/integrationLogos";
 import { useAuth } from "../../../hooks/useAuth";
 import { supabase } from "../../../lib/supabase";
 import { toast } from "../../../components/Toast";
@@ -92,7 +93,7 @@ function ShopifyIntegrationCard() {
 
         <div className="flex flex-col pb-4">
           <div className="mb-4 flex h-12 w-12 flex-none items-center justify-center rounded-2xl bg-base-raised overflow-hidden border border-base-border/50">
-            <img src="https://upload.wikimedia.org/wikipedia/commons/e/e1/Shopify_Logo.png" alt="Shopify" className="h-2/3 w-2/3 object-contain" />
+            <img src={getIntegrationLogo("shopify") || ""} alt="Shopify" className="h-2/3 w-2/3 object-contain" />
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -152,7 +153,7 @@ function ShopifyIntegrationCard() {
             {/* Header */}
             <div className="flex items-center gap-4 px-7 py-6 border-b border-base-border/60 bg-base-raised/30">
               <div className="h-11 w-11 rounded-2xl overflow-hidden border border-base-border/50 flex-shrink-0 flex items-center justify-center bg-base-raised">
-                <img src="https://upload.wikimedia.org/wikipedia/commons/e/e1/Shopify_Logo.png" alt="Shopify" className="h-2/3 w-2/3 object-contain" />
+                <img src={getIntegrationLogo("shopify") || ""} alt="Shopify" className="h-2/3 w-2/3 object-contain" />
               </div>
               <div className="flex-1">
                 <h2 className="text-[18px] font-bold text-ink">Shopify Connections</h2>
