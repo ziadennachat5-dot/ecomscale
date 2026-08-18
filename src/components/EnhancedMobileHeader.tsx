@@ -5,7 +5,8 @@ import {
   Bell, 
   Menu, 
   X,
-  Settings
+  Settings,
+  Zap
 } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
 import { useTheme } from "../hooks/useTheme";

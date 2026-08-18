@@ -18,11 +18,13 @@ import {
   Palette,
   ChevronDown,
   ChevronUp,
+  Server,
+  TrendingUp,
+  GitMerge,
   Download,
   Search,
   Clock,
   Zap,
-  TrendingUp,
   AlertCircle,
   CheckCircle2,
   XCircle,
@@ -31,7 +33,6 @@ import {
   Copy,
   Eye,
   EyeOff,
-  GitMerge,
 } from "lucide-react";
 
 // Types
@@ -57,6 +58,11 @@ interface AIProvider {
   request_count: number;
   created_at: string;
   updated_at: string;
+  // Additional fields for UI state
+  rate_limit_until?: string | null;
+  last_used?: string;
+  requests?: number;
+  errors?: number;
 }
 
 interface UsageStats {
@@ -86,7 +92,7 @@ interface Prompt {
 interface LandingPageStyle {
   id: string;
   section: string;
-  style_config: Record<string, any>;
+  style_config: string;
   active: boolean;
   updated_at: string;
 }
@@ -153,7 +159,7 @@ export default function AIInfrastructure() {
   // Provider form state
   const [providerForm, setProviderForm] = useState({
     name: '',
-    provider_type: 'gemini' as const,
+    provider_type: 'gemini' as 'gemini' | 'openai' | 'anthropic' | 'custom',
     project_id: '',
     model_id: '',
     priority: 1,
@@ -339,8 +345,8 @@ export default function AIInfrastructure() {
     const interval = setInterval(() => {
       const newCountdowns: Record<string, number> = {};
       providers.forEach(provider => {
-        if (provider.status === 'rate_limited' && provider.rate_limit_until) {
-          const until = new Date(provider.rate_limit_until).getTime();
+        if (provider.status === 'RATE_LIMITED' && provider.cooldown_until) {
+          const until = new Date(provider.cooldown_until).getTime();
           const now = Date.now();
           const remaining = Math.max(0, Math.floor((until - now) / 1000));
           if (remaining > 0) {
@@ -359,7 +365,7 @@ export default function AIInfrastructure() {
     setEditingProvider(null);
     setProviderForm({
       name: '',
-      provider_type: 'gemini',
+      provider_type: 'gemini' as const,
       project_id: '',
       model_id: '',
       priority: 1,
@@ -449,11 +455,11 @@ export default function AIInfrastructure() {
       // Update status to testing
       await supabase
         .from('ai_providers')
-        .update({ status: 'testing' })
+        .update({ status: 'TESTING' })
         .eq('id', provider.id);
 
       setProviders(prev => prev.map(p =>
-        p.id === provider.id ? { ...p, status: 'testing' } : p
+        p.id === provider.id ? { ...p, status: 'TESTING' } : p
       ));
 
       // Simulate test - in real implementation, make actual API call
@@ -461,11 +467,11 @@ export default function AIInfrastructure() {
 
       // Update status based on result
       const success = Math.random() > 0.2; // 80% success rate for demo
-      const newStatus = success ? 'healthy' : 'failed';
+      const newStatus = success ? 'HEALTHY' : 'FAILED';
 
       await supabase
         .from('ai_providers')
-        .update({ status: newStatus, last_used: new Date().toISOString() })
+        .update({ status: newStatus, last_success: success ? new Date().toISOString() : null, last_failure: !success ? new Date().toISOString() : null })
         .eq('id', provider.id);
 
       setProviders(prev => prev.map(p =>
@@ -482,174 +488,56 @@ export default function AIInfrastructure() {
   const handleRetryProvider = async (provider: AIProvider) => {
     await supabase
       .from('ai_providers')
-      .update({ status: 'healthy', rate_limit_until: null })
+      .update({ status: 'HEALTHY', cooldown_until: null })
       .eq('id', provider.id);
 
     setProviders(prev => prev.map(p =>
-      p.id === provider.id ? { ...p, status: 'healthy', rate_limit_until: null } : p
+      p.id === provider.id ? { ...p, status: 'HEALTHY', rate_limit_until: null } : p
     ));
 
     toast.success('Provider retry enabled');
   };
 
-  // Prompt CRUD operations
-  const handleAddPrompt = () => {
-    setEditingPrompt(null);
-    setPromptForm({ task_type: '', prompt_text: '' });
-    setPromptModalOpen(true);
-  };
-
-  const handleEditPrompt = (prompt: Prompt) => {
-    setEditingPrompt(prompt);
-    setPromptForm({ task_type: prompt.task_type, prompt_text: prompt.prompt_text });
-    setPromptModalOpen(true);
-  };
-
-  const handleSavePrompt = async () => {
-    try {
-      if (editingPrompt) {
-        const { error } = await supabase
-          .from('ai_prompts')
-          .update({
-            task_type: promptForm.task_type,
-            prompt_text: promptForm.prompt_text,
-          })
-          .eq('id', editingPrompt.id);
-
-        if (error) throw error;
-        toast.success('Prompt updated successfully');
-      } else {
-        const { error } = await supabase
-          .from('ai_prompts')
-          .insert({
-            task_type: promptForm.task_type,
-            prompt_text: promptForm.prompt_text,
-            version: 1,
-            active: true,
-          });
-
-        if (error) throw error;
-        toast.success('Prompt added successfully');
-      }
-
-      setPromptModalOpen(false);
-      loadPrompts();
-    } catch (error) {
-      toast.error('Failed to save prompt');
-      console.error(error);
-    }
-  };
-
-  const handleDeletePrompt = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this prompt?')) return;
-
-    const { error } = await supabase.from('ai_prompts').delete().eq('id', id);
-    if (error) {
-      toast.error('Failed to delete prompt');
-      console.error(error);
-    } else {
-      toast.success('Prompt deleted successfully');
-      loadPrompts();
-    }
-  };
-
-  const handleTogglePromptActive = async (prompt: Prompt) => {
-    const { error } = await supabase
-      .from('ai_prompts')
-      .update({ active: !prompt.active })
-      .eq('id', prompt.id);
-
-    if (error) {
-      toast.error('Failed to toggle prompt');
-      console.error(error);
-    } else {
-      setPrompts(prev => prev.map(p =>
-        p.id === prompt.id ? { ...p, active: !p.active } : p
-      ));
-      toast.success('Prompt toggled successfully');
-    }
-  };
-
-  // Style CRUD operations
-  const handleAddStyle = () => {
-    setEditingStyle(null);
-    setStyleForm({ section: '', style_config: '{}' });
-    setStyleModalOpen(true);
-  };
-
-  const handleEditStyle = (style: LandingPageStyle) => {
-    setEditingStyle(style);
-    setStyleForm({
-      section: style.section,
-      style_config: JSON.stringify(style.style_config, null, 2)
-    });
-    setStyleModalOpen(true);
-  };
-
-  const handleSaveStyle = async () => {
-    try {
-      const styleConfig = JSON.parse(styleForm.style_config);
-
-      if (editingStyle) {
-        const { error } = await supabase
-          .from('landing_page_styles')
-          .update({
-            section: styleForm.section,
-            style_config: styleConfig,
-          })
-          .eq('id', editingStyle.id);
-
-        if (error) throw error;
-        toast.success('Style updated successfully');
-      } else {
-        const { error } = await supabase
-          .from('landing_page_styles')
-          .insert({
-            section: styleForm.section,
-            style_config: styleConfig,
-            active: true,
-          });
-
-        if (error) throw error;
-        toast.success('Style added successfully');
-      }
-
-      setStyleModalOpen(false);
-      loadStyles();
-    } catch (error) {
-      toast.error('Invalid JSON in style config');
-      console.error(error);
-    }
-  };
-
-  const handleDeleteStyle = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this style?')) return;
-
-    const { error } = await supabase.from('landing_page_styles').delete().eq('id', id);
-    if (error) {
-      toast.error('Failed to delete style');
-      console.error(error);
-    } else {
-      toast.success('Style deleted successfully');
-      loadStyles();
-    }
-  };
-
-  // Routing CRUD operations
+  // Routing handlers
   const handleAddRouting = () => {
     setEditingRouting(null);
-    setRoutingForm({ task_type: '', primary_provider_id: '', fallback_provider_ids: [] });
+    setRoutingForm({
+      task_type: '',
+      primary_provider_id: '',
+      fallback_provider_ids: [] as string[],
+    });
     setRoutingModalOpen(true);
   };
 
-  const handleEditRouting = (routing: RoutingConfig) => {
-    setEditingRouting(routing);
+  const handleEditRouting = (config: RoutingConfig) => {
+    setEditingRouting(config);
     setRoutingForm({
-      task_type: routing.task_type,
-      primary_provider_id: routing.primary_provider_id,
-      fallback_provider_ids: routing.fallback_provider_ids,
+      task_type: config.task_type,
+      primary_provider_id: config.primary_provider_id,
+      fallback_provider_ids: config.fallback_provider_ids,
     });
     setRoutingModalOpen(true);
+  };
+
+  const handleDeleteRouting = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this routing configuration?')) return;
+    const { error } = await supabase.from('ai_routing_config').delete().eq('id', id);
+    if (error) {
+      toast.error('Failed to delete routing configuration');
+      console.error(error);
+    } else {
+      toast.success('Routing configuration deleted successfully');
+      loadRoutingConfigs();
+    }
+  };
+
+  const toggleFallbackProvider = (providerId: string) => {
+    setRoutingForm(prev => ({
+      ...prev,
+      fallback_provider_ids: prev.fallback_provider_ids.includes(providerId)
+        ? prev.fallback_provider_ids.filter(id => id !== providerId)
+        : [...prev.fallback_provider_ids, providerId],
+    }));
   };
 
   const handleSaveRouting = async () => {
@@ -663,9 +551,8 @@ export default function AIInfrastructure() {
             fallback_provider_ids: routingForm.fallback_provider_ids,
           })
           .eq('id', editingRouting.id);
-
         if (error) throw error;
-        toast.success('Routing config updated successfully');
+        toast.success('Routing configuration updated successfully');
       } else {
         const { error } = await supabase
           .from('ai_routing_config')
@@ -674,152 +561,218 @@ export default function AIInfrastructure() {
             primary_provider_id: routingForm.primary_provider_id,
             fallback_provider_ids: routingForm.fallback_provider_ids,
           });
-
         if (error) throw error;
-        toast.success('Routing config added successfully');
+        toast.success('Routing configuration added successfully');
       }
-
       setRoutingModalOpen(false);
       loadRoutingConfigs();
     } catch (error) {
-      toast.error('Failed to save routing config');
+      toast.error('Failed to save routing configuration');
       console.error(error);
     }
   };
 
-  const handleDeleteRouting = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this routing config?')) return;
+  // Prompt handlers
+  const handleAddPrompt = () => {
+    setEditingPrompt(null);
+    setPromptForm({ task_type: '', prompt_text: '' });
+    setPromptModalOpen(true);
+  };
 
-    const { error } = await supabase.from('ai_routing_config').delete().eq('id', id);
+  const handleEditPrompt = (prompt: Prompt) => {
+    setEditingPrompt(prompt);
+    setPromptForm({ task_type: prompt.task_type, prompt_text: prompt.prompt_text });
+    setPromptModalOpen(true);
+  };
+
+  const handleDeletePrompt = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this prompt?')) return;
+    const { error } = await supabase.from('ai_prompts').delete().eq('id', id);
     if (error) {
-      toast.error('Failed to delete routing config');
+      toast.error('Failed to delete prompt');
       console.error(error);
     } else {
-      toast.success('Routing config deleted successfully');
-      loadRoutingConfigs();
+      toast.success('Prompt deleted successfully');
+      loadPrompts();
     }
   };
 
-  // Health check interval update
-  const handleUpdateHealthCheckInterval = async () => {
-    const { error } = await supabase
-      .from('system_settings')
-      .upsert({ key: 'ai_health_check_interval', value: healthCheckInterval });
+  const handleSavePrompt = async () => {
+    try {
+      if (editingPrompt) {
+        const { error } = await supabase
+          .from('ai_prompts')
+          .update({
+            task_type: promptForm.task_type,
+            prompt_text: promptForm.prompt_text,
+          })
+          .eq('id', editingPrompt.id);
+        if (error) throw error;
+        toast.success('Prompt updated successfully');
+      } else {
+        const { error } = await supabase
+          .from('ai_prompts')
+          .insert({
+            task_type: promptForm.task_type,
+            prompt_text: promptForm.prompt_text,
+          });
+        if (error) throw error;
+        toast.success('Prompt added successfully');
+      }
+      setPromptModalOpen(false);
+      loadPrompts();
+    } catch (error) {
+      toast.error('Failed to save prompt');
+      console.error(error);
+    }
+  };
 
+  const handleTogglePromptActive = async (prompt: Prompt) => {
+    try {
+      const { error } = await supabase
+        .from('ai_prompts')
+        .update({ active: !prompt.active })
+        .eq('id', prompt.id);
+      if (error) throw error;
+      toast.success(`Prompt ${prompt.active ? 'deactivated' : 'activated'} successfully`);
+      loadPrompts();
+    } catch (error) {
+      toast.error('Failed to toggle prompt status');
+      console.error(error);
+    }
+  };
+
+  // Style handlers
+  const handleAddStyle = () => {
+    setEditingStyle(null);
+    setStyleForm({ section: '', style_config: '{}' });
+    setStyleModalOpen(true);
+  };
+
+  const handleEditStyle = (style: LandingPageStyle) => {
+    setEditingStyle(style);
+    setStyleForm({ section: style.section, style_config: style.style_config });
+    setStyleModalOpen(true);
+  };
+
+  const handleDeleteStyle = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this style?')) return;
+    const { error } = await supabase.from('landing_page_styles').delete().eq('id', id);
     if (error) {
-      toast.error('Failed to update health check interval');
+      toast.error('Failed to delete style');
       console.error(error);
     } else {
-      toast.success('Health check interval updated');
+      toast.success('Style deleted successfully');
+      loadStyles();
     }
   };
 
-  // Toggle capability
-  const toggleCapability = (capability: string) => {
+  const handleSaveStyle = async () => {
+    try {
+      if (editingStyle) {
+        const { error } = await supabase
+          .from('landing_page_styles')
+          .update({
+            section: styleForm.section,
+            style_config: styleForm.style_config,
+          })
+          .eq('id', editingStyle.id);
+        if (error) throw error;
+        toast.success('Style updated successfully');
+      } else {
+        const { error } = await supabase
+          .from('landing_page_styles')
+          .insert({
+            section: styleForm.section,
+            style_config: styleForm.style_config,
+          });
+        if (error) throw error;
+        toast.success('Style added successfully');
+      }
+      setStyleModalOpen(false);
+      loadStyles();
+    } catch (error) {
+      toast.error('Failed to save style');
+      console.error(error);
+    }
+  };
+
+  const toggleCapability = (cap: string) => {
     setProviderForm(prev => ({
       ...prev,
-      capabilities: prev.capabilities.includes(capability)
-        ? prev.capabilities.filter(c => c !== capability)
-        : [...prev.capabilities, capability],
+      capabilities: prev.capabilities.includes(cap)
+        ? prev.capabilities.filter(c => c !== cap)
+        : [...prev.capabilities, cap],
     }));
   };
 
-  // Toggle fallback provider
-  const toggleFallbackProvider = (providerId: string) => {
-    setRoutingForm(prev => ({
-      ...prev,
-      fallback_provider_ids: prev.fallback_provider_ids.includes(providerId)
-        ? prev.fallback_provider_ids.filter(id => id !== providerId)
-        : [...prev.fallback_provider_ids, providerId],
-    }));
+  // Status configuration helper
+  const statusConfig = (status: ProviderStatus) => {
+    const configs: Record<ProviderStatus, { color: string; emoji: string; label: string }> = {
+      HEALTHY: { color: 'bg-green-500/10 text-green-400', emoji: '✓', label: 'Healthy' },
+      DEGRADED: { color: 'bg-yellow-500/10 text-yellow-400', emoji: '⚠', label: 'Degraded' },
+      RATE_LIMITED: { color: 'bg-orange-500/10 text-orange-400', emoji: '⏳', label: 'Rate Limited' },
+      FAILED: { color: 'bg-red-500/10 text-red-400', emoji: '✗', label: 'Failed' },
+      DISABLED: { color: 'bg-slate-500/10 text-slate-400', emoji: '○', label: 'Disabled' },
+      TESTING: { color: 'bg-blue-500/10 text-blue-400', emoji: '⟳', label: 'Testing' },
+    };
+    return configs[status] || configs.HEALTHY;
   };
 
+  // Main JSX return
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="AI Infrastructure"
-        subtitle="Manage AI providers, routing, prompts, and monitor usage across the platform."
-        action={
-          <button
-            onClick={loadProviders}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-1.5 text-[12.5px] text-slate-300 hover:bg-slate-700/50 transition-colors"
-          >
-            <RefreshCw size={13} /> Refresh
-          </button>
-        }
-      />
-
-      {/* Health Check Configuration */}
-      <div className="rounded-xl border border-slate-800 bg-slate-900/50 backdrop-blur-sm p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <Activity size={16} className="text-brand-accent" />
-          <div className="text-[12px] uppercase tracking-[0.2em] text-slate-500 font-medium">Health Check Configuration</div>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="flex-1">
-            <label className="text-[12px] text-slate-400 mb-1 block">Health Check Interval (seconds)</label>
-            <input
-              type="number"
-              value={healthCheckInterval}
-              onChange={e => setHealthCheckInterval(Number(e.target.value))}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-[13px] text-white focus:outline-none focus:border-brand-accent"
-              min="10"
-              max="3600"
-            />
+    <div className="min-h-screen bg-slate-950 text-white p-6">
+      <div className="max-w-7xl mx-auto space-y-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">AI Infrastructure</h1>
+            <p className="text-slate-400 text-sm">Manage AI providers, routing, and monitoring</p>
           </div>
-          <button
-            onClick={handleUpdateHealthCheckInterval}
-            className="mt-5 inline-flex items-center gap-1.5 rounded-lg bg-brand-accent px-4 py-2 text-[13px] font-medium text-white hover:bg-brand-accent/80 transition-colors"
-          >
-            <Save size={14} /> Save
-          </button>
-        </div>
-      </div>
-
-      {/* Provider Management */}
-      <div className="rounded-xl border border-slate-800 bg-slate-900/50 backdrop-blur-sm overflow-hidden">
-        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
-          <div className="flex items-center gap-2">
-            <BrainCircuit size={18} className="text-brand-accent" />
-            <div className="text-[14px] font-semibold text-white">AI Providers</div>
-          </div>
-          <button
-            onClick={handleAddProvider}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-brand-accent px-3 py-1.5 text-[12.5px] font-medium text-white hover:bg-brand-accent/80 transition-colors"
-          >
-            <Plus size={14} /> Add Provider
-          </button>
         </div>
 
-        {loadingProviders ? (
-          <div className="flex items-center justify-center p-8">
-            <Loader2 size={20} className="animate-spin text-slate-500" />
+        {/* Providers Table */}
+        <div className="rounded-xl border border-slate-800 bg-slate-900/50 backdrop-blur-sm overflow-hidden">
+          <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
+            <div className="flex items-center gap-2">
+              <Server size={18} className="text-brand-accent" />
+              <div className="text-[14px] font-semibold text-white">AI Providers</div>
+            </div>
+            <button
+              onClick={handleAddProvider}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-brand-accent px-3 py-1.5 text-[12.5px] font-medium text-white hover:bg-brand-accent/80 transition-colors"
+            >
+              <Plus size={14} /> Add Provider
+            </button>
           </div>
-        ) : providers.length === 0 ? (
-          <div className="p-10 text-center">
-            <BrainCircuit size={32} className="mx-auto mb-3 text-slate-600" />
-            <div className="text-[14px] font-medium text-slate-400">No AI providers configured</div>
-            <div className="text-[12.5px] text-slate-500 mt-1">Add your first AI provider to get started</div>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-800 bg-slate-800/30">
-                  <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Provider</th>
-                  <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Project</th>
-                  <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Model</th>
-                  <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Status</th>
-                  <th className="px-5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Requests</th>
-                  <th className="px-5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Errors</th>
-                  <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Last Used</th>
-                  <th className="px-5 py-3 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-500">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/50">
-                {providers.map(provider => {
-                  const statusConfig = STATUS_CONFIG[provider.status];
-                  return (
+
+          {loadingProviders ? (
+            <div className="flex items-center justify-center p-8">
+              <Loader2 size={20} className="animate-spin text-slate-500" />
+            </div>
+          ) : providers.length === 0 ? (
+            <div className="p-10 text-center">
+              <Server size={32} className="mx-auto mb-3 text-slate-600" />
+              <div className="text-[14px] font-medium text-slate-400">No AI providers configured</div>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-800/30">
+                    <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Provider</th>
+                    <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Project ID</th>
+                    <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Model ID</th>
+                    <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Status</th>
+                    <th className="px-5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Requests</th>
+                    <th className="px-5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Errors</th>
+                    <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Last Used</th>
+                    <th className="px-5 py-3 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-500">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/50">
+                  {providers.map(provider => {
+                    const config = statusConfig(provider.status);
+                    return (
                     <tr key={provider.id} className="hover:bg-slate-800/20 transition-colors">
                       <td className="px-5 py-3">
                         <div className="flex items-center gap-2">
@@ -832,17 +785,17 @@ export default function AIInfrastructure() {
                       <td className="px-5 py-3 text-[12.5px] text-slate-400">{provider.project_id}</td>
                       <td className="px-5 py-3 text-[12.5px] text-slate-400">{provider.model_id}</td>
                       <td className="px-5 py-3">
-                        <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11.5px] font-medium ${statusConfig.color}`}>
-                          {statusConfig.emoji} {statusConfig.label}
+                        <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11.5px] font-medium ${config.color}`}>
+                          {config.emoji} {config.label}
                         </span>
-                        {provider.status === 'rate_limited' && countdowns[provider.id] !== undefined && (
+                        {provider.status === 'RATE_LIMITED' && countdowns[provider.id] !== undefined && (
                           <div className="text-[10px] text-orange-400 mt-1">
                             Retry in: {Math.floor(countdowns[provider.id] / 60)}:{(countdowns[provider.id] % 60).toString().padStart(2, '0')}
                           </div>
                         )}
                       </td>
-                      <td className="px-5 py-3 text-right text-[12.5px] text-slate-400">{provider.requests.toLocaleString()}</td>
-                      <td className="px-5 py-3 text-right text-[12.5px] text-red-400">{provider.errors.toLocaleString()}</td>
+                      <td className="px-5 py-3 text-right text-[12.5px] text-slate-400">{(provider.requests ?? 0).toLocaleString()}</td>
+                      <td className="px-5 py-3 text-right text-[12.5px] text-red-400">{(provider.errors ?? 0).toLocaleString()}</td>
                       <td className="px-5 py-3 text-[12px] text-slate-500">
                         {provider.last_used ? new Date(provider.last_used).toLocaleString() : 'Never'}
                       </td>
@@ -855,7 +808,7 @@ export default function AIInfrastructure() {
                           >
                             <Play size={14} />
                           </button>
-                          {provider.status === 'rate_limited' && (
+                          {provider.status === 'RATE_LIMITED' && (
                             <button
                               onClick={() => handleRetryProvider(provider)}
                               className="p-1.5 rounded-lg hover:bg-slate-700 text-slate-400 hover:text-blue-400 transition-colors"
@@ -1512,6 +1465,7 @@ export default function AIInfrastructure() {
           </div>
         </Modal>
       )}
+      </div>
     </div>
   );
 }

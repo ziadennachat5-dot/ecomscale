@@ -24,6 +24,7 @@ interface ReturnToStockModalProps {
 
 interface OrderResult {
     id: string;
+    "Order ID"?: string;
     order_number: string;
     tracking_number: string | null;
     coliaty_parcel_code: string | null;
@@ -231,7 +232,12 @@ export function ReturnToStockModal({ isOpen, onClose }: ReturnToStockModalProps)
         // Load product/stock details
         setIsProcessing(true);
         try {
-            const items = await loadOrderItems(order.id || order["Order ID"], order.sku, order.quantity, order.product_variant, workspace.id);
+            const orderId = order.id || order["Order ID"];
+            if (!orderId) {
+                setErrorMsg("Order ID is missing.");
+                return;
+            }
+            const items = await loadOrderItems(orderId, order.sku, order.quantity, order.product_variant, workspace?.id || "");
 
             setSelectedOrder({ ...order, items });
 
@@ -254,8 +260,13 @@ export function ReturnToStockModal({ isOpen, onClose }: ReturnToStockModalProps)
         setErrorMsg(null);
 
         try {
+            const orderId = selectedOrder.id || selectedOrder["Order ID"];
+            if (!orderId) {
+                setErrorMsg("Order ID is missing.");
+                return;
+            }
             const result = await executeReturnToStock(
-                selectedOrder.id || selectedOrder["Order ID"],
+                orderId,
                 selectedOrder.items,
                 selectedOrder.displayTracking,
                 workspace.id

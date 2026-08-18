@@ -393,7 +393,6 @@ export default function Shipping() {
                         ${isDirty ? "!border-red-500/60 shadow-[0_0_10px_rgba(239,68,68,0.4)]" : ""}
                         ${hasTrackingNumber ? "!opacity-50 !cursor-not-allowed" : ""}
                       `}
-                      title={hasTrackingNumber ? "Status is managed by shipping provider (has tracking number)" : undefined}
                     />
 
                     {hasTrackingNumber && (

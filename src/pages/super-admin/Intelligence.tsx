@@ -79,9 +79,9 @@ export default function Intelligence() {
             confirmationRate: data.total > 0 ? (data.delivered / data.total) * 100 : 0,
             returnRate: data.total > 0 ? (data.returned / data.total) * 100 : 0,
             refusedRate: data.total > 0 ? (data.refused / data.total) * 100 : 0,
-          };
+          } as Record<string, any>;
         })
-        .sort((a, b) => b[rankingMetric] - a[rankingMetric])
+        .sort((a, b) => (b[rankingMetric] as number) - (a[rankingMetric] as number))
         .slice(0, 10);
 
       const workspaceData: Record<string, any> = {};
@@ -126,9 +126,9 @@ export default function Intelligence() {
             returnRate: data.total > 0 ? (data.returned / data.total) * 100 : 0,
             refusedRate: data.total > 0 ? (data.refused / data.total) * 100 : 0,
             productCount: (productsRes.data || []).length,
-          };
+          } as Record<string, any>;
         })
-        .sort((a, b) => b[rankingMetric] - a[rankingMetric])
+        .sort((a, b) => (b[rankingMetric] as number) - (a[rankingMetric] as number))
         .slice(0, 10);
 
       setWinningProducts(winningProductsData);

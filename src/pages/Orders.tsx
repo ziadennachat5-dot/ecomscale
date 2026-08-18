@@ -1030,7 +1030,7 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
         address,
         total: Number(total),
         status: normalizeStatus(status),
-        delivery_status: deliveryStatus === "" ? null : normalizeShippingStatus(deliveryStatus),
+        delivery_status: !deliveryStatus ? null : normalizeShippingStatus(deliveryStatus),
         phone,
         shipping_cost: shippingCost,
       };
@@ -1061,7 +1061,7 @@ function EditOrderModal({ order, onClose, onUpdated }: { order: Order; onClose: 
             city_name: cityValue.city_name,
             total: Number(total),
             status: normalizeStatus(status),
-            delivery_status: deliveryStatus === "" ? null : normalizeShippingStatus(deliveryStatus),
+            delivery_status: !deliveryStatus ? null : normalizeShippingStatus(deliveryStatus),
             phone,
           };
           const fallbackQuery = supabase.from("orders").update(fallbackPayload);
