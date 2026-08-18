@@ -81,7 +81,7 @@ export default function AdminUsers() {
       return; 
     }
 
-    const wids = Array.from(new Set((data ?? []).map(r => r.workspace_id).filter(Boolean) as string[]));
+    const wids = Array.from(new Set((data ?? []).map((r: any) => r.workspace_id).filter(Boolean) as string[]));
     const { data: wData } = await supabase.from("workspaces").select("id, name, created_at, meta_access_token, meta_ad_account_id").in("id", wids);
     setWorkspaceMap(Object.fromEntries((wData ?? []).map(ws => [ws.id, ws as Workspace])));
     setUsers((data ?? []) as AdminUserRow[]);

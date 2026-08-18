@@ -35,17 +35,24 @@ export default function ActivityFeed() {
   const [filter, setFilter] = useState<string>("all");
 
   useEffect(() => {
-    fetchActivities();
+    const load = async () => {
+      await fetchActivities();
+    };
+    
+    load();
     
     // Subscribe to realtime changes
-    const subscription = supabase
+    const channel = supabase
       .channel('activity_logs')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs' }, (payload) => {
         setActivities(prev => [payload.new as ActivityLog, ...prev].slice(0, 100));
-      })
-      .subscribe();
+      });
+    
+    const subscription = channel.subscribe();
 
-    return () => subscription.unsubscribe();
+    return () => {
+      channel.unsubscribe();
+    };
   }, []);
 
   async function fetchActivities() {

@@ -63,6 +63,7 @@ export interface ReturnToStockResult {
     tracking: string;
     productName: string;
     qty: number;
+    newStock?: number | null;
     alreadyReturned?: boolean;
     notEligible?: boolean;
 }

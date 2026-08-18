@@ -141,7 +141,7 @@ const formatNumber = (value: number) => value.toLocaleString("en-US");
 // Helper to get effective status with priority: shipping_status > status (when tracking_number exists)
 function getEffectiveStatus(order: AnalyticsOrder): string {
   const hasShipment = !!order.tracking_number && String(order.tracking_number).trim() !== "";
-  return hasShipment ? order.shipping_status : order.status;
+  return hasShipment ? (order.shipping_status ?? order.status) : order.status;
 }
 
 export default function GlobalAnalytics() {

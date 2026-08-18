@@ -271,7 +271,9 @@ export class GeminiProvider extends BaseProvider {
       const response = await this.callGeminiAPI(prompt, options);
       
       const latency = Date.now() - startTime;
-      this.recordSuccess(latency, response.tokens?.input + response.tokens?.output);
+      const inputTokens = response.tokens?.input ?? 0;
+      const outputTokens = response.tokens?.output ?? 0;
+      this.recordSuccess(latency, inputTokens + outputTokens);
       
       return response;
     } catch (error) {

@@ -44,16 +44,23 @@ export default function SuperAdminUsers() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetchUsers();
+    const load = async () => {
+      await fetchUsers();
+    };
     
-    const subscription = supabase
+    load();
+    
+    const channel = supabase
       .channel('users-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
         fetchUsers();
-      })
-      .subscribe();
+      });
+    
+    const subscription = channel.subscribe();
 
-    return () => subscription.unsubscribe();
+    return () => {
+      channel.unsubscribe();
+    };
   }, []);
 
   async function fetchUsers() {

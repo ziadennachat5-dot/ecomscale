@@ -542,11 +542,11 @@ export default function Delivering() {
         
         // If status is refused, use refused price
         if (isRefusedStatus(status)) {
-          const refusedPrice = await getRefusedPrice(panelOrder.city);
+          const refusedPrice = panelOrder.city ? await getRefusedPrice(panelOrder.city) : null;
           if (mounted) setShippingPrice(refusedPrice);
         } else {
           // Use normal delivery price
-          const price = await getShippingPrice(panelOrder.city);
+          const price = panelOrder.city ? await getShippingPrice(panelOrder.city) : null;
           if (mounted) setShippingPrice(price);
         }
       } catch (error) {

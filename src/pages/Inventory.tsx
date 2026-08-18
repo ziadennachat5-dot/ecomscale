@@ -216,7 +216,7 @@ export default function Inventory() {
       .from("products")
       .update({ stock: newValue })
       .eq("sku", sku)
-      .eq("workspace_id", workspace.id);
+      .eq("workspace_id", workspace?.id);
 
     if (error) {
       console.error('[Inventory] Error updating stock:', error);

@@ -34,6 +34,15 @@ export interface DashboardData {
   expenses: any[];
   metaCampaigns: any[];
   currency?: string | null;
+  stats?: {
+    revenue: number;
+    orders: number;
+    confirmed: number;
+    pending: number;
+    delivered: number;
+    cancelled: number;
+  };
+  recentOrders?: any[];
 }
 
 const EMPTY: DashboardData = {

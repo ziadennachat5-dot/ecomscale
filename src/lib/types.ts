@@ -55,6 +55,7 @@ export interface Workspace {
   shopify_expires_at?: string | null;
   shopify_scopes?: string | null;
   shopify_connected_at?: string | null;
+  primary_color?: string | null;
 }
 
 export type UserRole = "founder" | "super_admin" | "supervisor" | "manager" | "employee" | "user" | "owner" | "admin" | "viewer" | "agent";
@@ -115,6 +116,7 @@ export interface Order {
   delivery_status?: string | null;
   campaign_id: string | null;
   created_at: string;
+  updated_at?: string;
   confirmed_at: string | null;
   delivered_at: string | null;
   cancelled_at: string | null;
@@ -136,6 +138,7 @@ export interface Order {
   variant_price?: number;
   variantPrice?: number;
   sku?: string | null;
+  ozon_city_id?: string | null;
   customer_ip?: string | null;
   customerIp?: string | null;
   product_variant?: string | null;
